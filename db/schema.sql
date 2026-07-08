@@ -73,5 +73,8 @@ CREATE TABLE IF NOT EXISTS course_log (
   user_query                TEXT,
   extracted_conditions_json TEXT,
   recommended_places_json   TEXT,
+  fallback_type             TEXT,   -- NULL(정상) / 'partial_filter' / 'full_rule_based'
   created_at                TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_course_log_fallback ON course_log(fallback_type);

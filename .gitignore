@@ -9,6 +9,7 @@ venv/
 
 # SQLite
 *.db
+!db/travel.db
 *.sqlite
 *.sqlite3
 
@@ -16,6 +17,10 @@ venv/
 data/raw/
 data/*.db
 data/standard_csv/*.csv
+
+# Local project notes
+대전_여행코스_챗봇_API수집_SQLite구축_가이드.md
+대전_여행코스_챗봇_개발계획서_v2_LLM하이브리드.md
 
 # IDE
 .vscode/
