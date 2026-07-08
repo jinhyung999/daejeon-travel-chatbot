@@ -59,7 +59,11 @@ def collect():
             "has_parking": None,
             "tel": it.get("tel"),
             "source_api": "tourapi",
-            "extra_json": json.dumps({"firstimage": it.get("firstimage"), "cat3": it.get("cat3")}, ensure_ascii=False),
+            "extra_json": json.dumps({
+                "firstimage": it.get("firstimage"),
+                "cat3": it.get("cat3"),
+                "contentTypeId": CONTENT_TYPE_ID,
+            }, ensure_ascii=False),
         })
     upsert_place(rows)
     return rows

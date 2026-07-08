@@ -181,6 +181,9 @@ def collect():
                     # 대표 이미지 주소
                     "firstimage": it.get("firstimage"),
 
+                    # detailIntro2 호출 시 필요한 원본 콘텐츠타입ID
+                    "contentTypeId": content_type_id,
+
                 }, ensure_ascii=False),
             })
 
