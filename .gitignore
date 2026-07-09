@@ -16,6 +16,8 @@ venv/
 # Data
 data/raw/
 data/*.db
+csv/
+*.csv
 data/standard_csv/*.csv
 
 # Local project notes

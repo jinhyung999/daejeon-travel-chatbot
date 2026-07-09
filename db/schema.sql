@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS transport (
 
 CREATE INDEX IF NOT EXISTS idx_transport_latlng ON transport(lat, lng);
 
+CREATE TABLE IF NOT EXISTS medical (
+  medical_id  TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  category    TEXT,
+  address     TEXT,
+  lat         REAL,
+  lng         REAL,
+  tel         TEXT,
+  source_api  TEXT,
+  extra_json  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_medical_latlng ON medical(lat, lng);
+
 CREATE TABLE IF NOT EXISTS course_log (
   log_id                    INTEGER PRIMARY KEY AUTOINCREMENT,
   user_query                TEXT,

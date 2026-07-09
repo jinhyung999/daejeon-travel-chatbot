@@ -268,3 +268,33 @@ def upsert_transport(rows: list[dict]):
     conn.close()
 
     print(f"transport upsert: {len(rows)}건")
+
+
+# medical 테이블에 데이터 저장 (없으면 INSERT, 있으면 UPDATE)
+def upsert_medical(rows: list[dict]):
+
+    if not rows:
+        print("medical upsert: 0건")
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.executemany("""
+        INSERT INTO medical (medical_id, name, category, address, lat, lng,
+                              tel, source_api, extra_json)
+        VALUES (:medical_id, :name, :category, :address, :lat, :lng,
+                :tel, :source_api, :extra_json)
+
+        -- medical_id가 이미 존재하면 UPDATE 수행
+        ON CONFLICT(medical_id) DO UPDATE SET
+            name=excluded.name, category=excluded.category,
+            address=excluded.address, lat=excluded.lat, lng=excluded.lng,
+            tel=excluded.tel, source_api=excluded.source_api,
+            extra_json=excluded.extra_json
+    """, rows)
+
+    conn.commit()
+    conn.close()
+
+    print(f"medical upsert: {len(rows)}건")
