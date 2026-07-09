@@ -104,14 +104,21 @@ def enrich(categories=("attraction", "culture", "restaurant", "cafe", "lodging")
         WHERE source_api='tourapi' AND category IN ({placeholders})
     """, categories).fetchall()
 
-    updated, skipped = 0, 0
+    updated, skipped, failed = 0, 0, 0
     for place_id, extra_json in targets:
         content_type_id = json.loads(extra_json or "{}").get("contentTypeId")
         if content_type_id not in SUPPORTED_CONTENT_TYPE_IDS:
             skipped += 1
             continue
 
-        detail = fetch_detail_intro(place_id, content_type_id)
+        try:
+            detail = fetch_detail_intro(place_id, content_type_id)
+        except RuntimeError as e:
+            print(f"[skip] {place_id} 요청 실패: {e}")
+            failed += 1
+            time.sleep(0.3)
+            continue
+
         if not detail:
             skipped += 1
             time.sleep(0.3)
@@ -124,11 +131,16 @@ def enrich(categories=("attraction", "culture", "restaurant", "cafe", "lodging")
             WHERE place_id=?
         """, (open_time, close_day, has_parking, fee, place_id))
         updated += 1
+
+        # 중간에 실패해도 여기까지 처리한 내용은 보존
+        if updated % 20 == 0:
+            conn.commit()
+
         time.sleep(0.3)
 
     conn.commit()
     conn.close()
-    print(f"detailIntro2 보강 완료: {updated}건 갱신, {skipped}건 스킵(정보없음)")
+    print(f"detailIntro2 보강 완료: {updated}건 갱신, {skipped}건 스킵(정보없음), {failed}건 요청 실패")
 
 
 if __name__ == "__main__":

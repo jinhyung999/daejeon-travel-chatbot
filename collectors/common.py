@@ -126,11 +126,37 @@ def paginate(fetch_page_fn, num_of_rows=100, max_pages=200, sleep_sec=0.3):
 # place 테이블에 데이터 저장 (없으면 INSERT, 있으면 UPDATE)
 def upsert_place(rows: list[dict]):
 
+    if not rows:
+        print("place upsert: 0건 / 신규 0건 / 갱신 0건")
+        return {"total": 0, "inserted": 0, "updated": 0}
+
     # DB 연결
     conn = get_conn()
 
     # Cursor 생성
     cur = conn.cursor()
+
+    unique_place_ids = sorted({
+        row["place_id"]
+        for row in rows
+        if row.get("place_id")
+    })
+    existing_place_ids = set()
+
+    # SQLite has a variable limit, so check existing IDs in chunks.
+    for i in range(0, len(unique_place_ids), 900):
+        chunk = unique_place_ids[i:i + 900]
+        placeholders = ",".join("?" for _ in chunk)
+        existing_place_ids.update(
+            place_id
+            for (place_id,) in cur.execute(
+                f"SELECT place_id FROM place WHERE place_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+        )
+
+    inserted_count = len(set(unique_place_ids) - existing_place_ids)
+    updated_count = len(existing_place_ids)
 
     # 여러 행을 한 번에 실행
     cur.executemany("""
@@ -158,7 +184,16 @@ def upsert_place(rows: list[dict]):
     conn.close()
 
     # 저장 결과 출력
-    print(f"place upsert: {len(rows)}건")
+    print(
+        f"place upsert: {len(rows)}건 / "
+        f"신규 {inserted_count}건 / 갱신 {updated_count}건"
+    )
+
+    return {
+        "total": len(rows),
+        "inserted": inserted_count,
+        "updated": updated_count,
+    }
 
 
 # event 테이블에 데이터 저장 (없으면 INSERT, 있으면 UPDATE)
