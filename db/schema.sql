@@ -11,7 +11,9 @@ CREATE TABLE IF NOT EXISTS place (
   has_parking   INTEGER,
   tel           TEXT,
   source_api    TEXT,
-  extra_json    TEXT
+  extra_json    TEXT,
+  overview      TEXT,
+  homepage      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_place_category ON place(category);
