@@ -3,11 +3,13 @@
 # TourAPI detailCommon2로 장소 소개글(overview) 보강
 #
 # - 대상: place 테이블에서 source_api='tourapi'인 장소
-# - overview/homepage -> extra_json에 추가
+# - overview/homepage -> place의 전용 컬럼에 저장
+#   (예전엔 extra_json에 넣었는데, upsert_place가 extra_json을 통째로 덮어써서
+#    기본 수집 스크립트 재실행 시 이 값이 날아가는 버그가 있었음. 전용 컬럼으로
+#    분리하면 upsert_place의 UPDATE SET 절에 없는 컬럼이라 안전함)
 # - tel -> place.tel이 비어있을 때만 채움
 # =====================================================
 
-import json
 import os
 import time
 
@@ -56,20 +58,26 @@ def enrich_overview():
     conn = get_conn()
     cur = conn.cursor()
     targets = cur.execute("""
-        SELECT place_id, tel, extra_json FROM place
+        SELECT place_id, tel, overview FROM place
         WHERE source_api='tourapi'
     """).fetchall()
 
-    updated, skipped = 0, 0
-    for place_id, tel, extra_json in targets:
-        extra = json.loads(extra_json or "{}")
+    updated, skipped, failed = 0, 0, 0
+    for place_id, tel, existing_overview in targets:
 
         # 이미 overview가 있으면 재호출하지 않음 (중단 후 재실행 대비)
-        if extra.get("overview"):
+        if existing_overview:
             skipped += 1
             continue
 
-        detail = fetch_detail_common(place_id)
+        try:
+            detail = fetch_detail_common(place_id)
+        except RuntimeError as e:
+            print(f"[skip] {place_id} 요청 실패: {e}")
+            failed += 1
+            time.sleep(0.3)
+            continue
+
         if not detail:
             skipped += 1
             time.sleep(0.3)
@@ -79,24 +87,24 @@ def enrich_overview():
         homepage = _extract_homepage(detail.get("homepage"))
         new_tel = _clean_text(detail.get("tel"))
 
-        if overview:
-            extra["overview"] = overview
-        if homepage:
-            extra["homepage"] = homepage
-
         # tel은 기존 값이 없을 때만 채움
         tel_to_save = tel if tel else new_tel
 
         cur.execute("""
-            UPDATE place SET extra_json=?, tel=?
+            UPDATE place SET overview=?, homepage=?, tel=?
             WHERE place_id=?
-        """, (json.dumps(extra, ensure_ascii=False), tel_to_save, place_id))
+        """, (overview, homepage, tel_to_save, place_id))
         updated += 1
+
+        # 중간에 실패해도 여기까지 처리한 내용은 보존
+        if updated % 20 == 0:
+            conn.commit()
+
         time.sleep(0.3)
 
     conn.commit()
     conn.close()
-    print(f"detailCommon2 보강 완료: {updated}건 갱신, {skipped}건 스킵")
+    print(f"detailCommon2 보강 완료: {updated}건 갱신, {skipped}건 스킵, {failed}건 요청 실패")
 
 
 if __name__ == "__main__":
