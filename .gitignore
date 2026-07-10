@@ -27,6 +27,7 @@ data/standard_csv/*.csv
 # Reports
 *.pdf
 reports/
+docs/
 
 # IDE
 .vscode/
