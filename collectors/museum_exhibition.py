@@ -40,14 +40,16 @@ def _parse_schedule_items(page_html: str) -> list[dict]:
         start_date = match.group("start")
         end_date = match.group("end")
         rows.append({
+            # event_id 해시 입력은 기존(YYYY-MM-DD)을 유지해 재수집 시 ID가 바뀌지 않게 함
             "event_id": _make_event_id(name, start_date, end_date, place_name),
             "name": name,
             "place_name": place_name,
             "address": MUSEUM_ADDRESS,
             "lat": MUSEUM_LAT,
             "lng": MUSEUM_LNG,
-            "start_date": start_date,
-            "end_date": end_date,
+            # DB에는 다른 소스와 동일하게 YYYYMMDD 형식으로 저장 (기간 필터 호환)
+            "start_date": start_date.replace("-", ""),
+            "end_date": end_date.replace("-", ""),
             "fee": None,
             "source_api": "daejeon_museum",
         })
@@ -74,7 +76,7 @@ def collect(from_date: date | None = None):
 
     rows = [
         row for row in fetch_schedule()
-        if date.fromisoformat(row["end_date"]) >= from_date
+        if row["end_date"] >= from_date.strftime("%Y%m%d")
     ]
     upsert_event(rows)
     return rows
