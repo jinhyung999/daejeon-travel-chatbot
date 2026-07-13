@@ -70,6 +70,26 @@ CREATE TABLE IF NOT EXISTS transport (
 
 CREATE INDEX IF NOT EXISTS idx_transport_latlng ON transport(lat, lng);
 
+-- 버스 노선 메타정보 (TAGO BusRouteInfoInqireService/getRouteNoList)
+CREATE TABLE IF NOT EXISTS bus_route (
+  route_id    TEXT PRIMARY KEY,   -- TAGO routeid
+  route_no    TEXT,               -- 노선번호(표시용, 예: "705")
+  route_type  TEXT,               -- 마을버스/간선버스/급행버스/광역버스 등
+  collected_at TEXT               -- TAGO에서 이 노선 정보를 수집한 시점(정확도 판단용)
+);
+
+-- 노선별 경유 정류소 순서 (동선/환승 탐색의 기반 데이터)
+-- updowncd: TAGO가 제공하는 방향 구분(0/1, 편도순환 노선은 한쪽만 존재)
+CREATE TABLE IF NOT EXISTS bus_route_stop (
+  route_id    TEXT,
+  updowncd    INTEGER,
+  node_order  INTEGER,
+  stop_id     TEXT,               -- transport.stop_id 참조
+  PRIMARY KEY (route_id, updowncd, node_order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_route_stop_stop ON bus_route_stop(stop_id);
+
 CREATE TABLE IF NOT EXISTS medical (
   medical_id  TEXT PRIMARY KEY,
   name        TEXT NOT NULL,
