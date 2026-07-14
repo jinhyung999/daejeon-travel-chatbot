@@ -251,17 +251,29 @@ def upsert_parking(rows: list[dict]):
 # transport 테이블에 데이터 저장 (없으면 INSERT, 있으면 UPDATE)
 def upsert_transport(rows: list[dict]):
 
+    invalid_sources = {
+        row.get("source_api")
+        for row in rows
+        if row.get("source_api") != "tago"
+    }
+    if invalid_sources:
+        raise ValueError(
+            "transport는 TAGO 단일 원천만 허용합니다: "
+            f"invalid source_api={sorted(map(str, invalid_sources))}"
+        )
+
     conn = get_conn()
     cur = conn.cursor()
 
     cur.executemany("""
-        INSERT INTO transport (stop_id, name, type, lat, lng, routes)
-        VALUES (:stop_id, :name, :type, :lat, :lng, :routes)
+        INSERT INTO transport (stop_id, name, type, lat, lng, routes, source_api)
+        VALUES (:stop_id, :name, :type, :lat, :lng, :routes, :source_api)
 
         -- stop_id가 이미 존재하면 UPDATE 수행
         ON CONFLICT(stop_id) DO UPDATE SET
             name=excluded.name, type=excluded.type,
-            lat=excluded.lat, lng=excluded.lng, routes=excluded.routes
+            lat=excluded.lat, lng=excluded.lng, routes=excluded.routes,
+            source_api=excluded.source_api
     """, rows)
 
     conn.commit()

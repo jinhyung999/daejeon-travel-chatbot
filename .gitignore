@@ -36,3 +36,5 @@ docs/
 # OS
 .DS_Store
 Thumbs.db
+# TAGO 단일화 마이그레이션 전 자동 생성되는 로컬 DB 백업
+db/backups/

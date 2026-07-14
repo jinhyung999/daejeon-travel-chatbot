@@ -2,7 +2,7 @@ import os
 
 from dotenv import load_dotenv
 
-from common import paginate, request_with_retry, save_raw, upsert_transport
+from common import paginate, request_with_retry, save_raw
 
 load_dotenv()
 DAEJEON_BIS_API_KEY = os.getenv("DAEJEON_BIS_API_KEY")
@@ -30,6 +30,11 @@ def fetch_page(page_no, num_of_rows):
 
 
 def collect():
+    """대전시 BIS 정류소 원천을 수집해 raw JSON으로만 보관한다.
+
+    운영 버스 정류소 테이블은 TAGO nodeId로 단일화했으므로 BIS 데이터를
+    transport에 적재하지 않는다. BIS는 원천 비교/감사용으로만 유지한다.
+    """
     items = paginate(fetch_page)
     rows = []
     for it in items:
@@ -41,7 +46,7 @@ def collect():
             "lng": float(it["LONGITUDE"]) if it.get("LONGITUDE") else None,
             "routes": None,  # 이 API는 정류소 목록만 제공, 경유노선은 별도 조회 필요
         })
-    upsert_transport(rows)
+    print(f"대전시 BIS 원천 {len(rows)}건 수집 (raw 보관 전용, transport 미반영)")
     return rows
 
 

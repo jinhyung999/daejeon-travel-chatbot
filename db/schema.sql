@@ -60,12 +60,13 @@ CREATE TABLE IF NOT EXISTS weather (
 );
 
 CREATE TABLE IF NOT EXISTS transport (
-  stop_id  TEXT PRIMARY KEY,
-  name     TEXT,
-  type     TEXT,
-  lat      REAL,
-  lng      REAL,
-  routes   TEXT
+  stop_id    TEXT PRIMARY KEY,     -- TAGO nodeId (예: DJB8005621)
+  name       TEXT NOT NULL,
+  type       TEXT NOT NULL DEFAULT 'bus',
+  lat        REAL NOT NULL,
+  lng        REAL NOT NULL,
+  routes     TEXT,                 -- bus_route_stop에서 파생한 표시용 캐시
+  source_api TEXT NOT NULL DEFAULT 'tago' CHECK (source_api = 'tago')
 );
 
 CREATE INDEX IF NOT EXISTS idx_transport_latlng ON transport(lat, lng);
@@ -73,18 +74,18 @@ CREATE INDEX IF NOT EXISTS idx_transport_latlng ON transport(lat, lng);
 -- 버스 노선 메타정보 (TAGO BusRouteInfoInqireService/getRouteNoList)
 CREATE TABLE IF NOT EXISTS bus_route (
   route_id    TEXT PRIMARY KEY,   -- TAGO routeid
-  route_no    TEXT,               -- 노선번호(표시용, 예: "705")
+  route_no    TEXT NOT NULL,      -- 노선번호(표시용, 예: "705")
   route_type  TEXT,               -- 마을버스/간선버스/급행버스/광역버스 등
-  collected_at TEXT               -- TAGO에서 이 노선 정보를 수집한 시점(정확도 판단용)
+  collected_at TEXT NOT NULL      -- TAGO에서 이 노선 정보를 수집한 시점(정확도 판단용)
 );
 
 -- 노선별 경유 정류소 순서 (동선/환승 탐색의 기반 데이터)
 -- updowncd: TAGO가 제공하는 방향 구분(0/1, 편도순환 노선은 한쪽만 존재)
 CREATE TABLE IF NOT EXISTS bus_route_stop (
-  route_id    TEXT,
-  updowncd    INTEGER,
-  node_order  INTEGER,
-  stop_id     TEXT,               -- transport.stop_id 참조
+  route_id    TEXT NOT NULL REFERENCES bus_route(route_id) ON DELETE CASCADE,
+  updowncd    INTEGER NOT NULL,
+  node_order  INTEGER NOT NULL,
+  stop_id     TEXT NOT NULL REFERENCES transport(stop_id),
   PRIMARY KEY (route_id, updowncd, node_order)
 );
 
