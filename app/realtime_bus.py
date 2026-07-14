@@ -50,7 +50,10 @@ def get_arrival_minutes(tago_node_id: str, route_id: str) -> float | None:
     if resp is None:
         return None
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
     header = data.get("response", {}).get("header", {})
     if str(header.get("resultCode")) not in ("0", "00"):
         return None
@@ -63,7 +66,9 @@ def get_arrival_minutes(tago_node_id: str, route_id: str) -> float | None:
 
     for it in item:
         if it.get("routeid") == route_id:
-            return it["arrtime"] / 60
+            arrtime = it.get("arrtime")
+            if arrtime is not None:
+                return arrtime / 60
 
     return None
 
