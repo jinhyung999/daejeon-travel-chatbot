@@ -21,6 +21,8 @@ csv/
 data/standard_csv/*.csv
 
 # Local project notes
+*.md
+!/README.md
 대전_여행코스_챗봇_API수집_SQLite구축_가이드.md
 대전_여행코스_챗봇_개발계획서_v2_LLM하이브리드.md
 
