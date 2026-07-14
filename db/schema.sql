@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS transport (
   type     TEXT,
   lat      REAL,
   lng      REAL,
-  routes   TEXT
+  routes   TEXT,
+  tago_node_id TEXT   -- TAGO 실시간 도착예측 API 조회용 원본 nodeId (scripts/backfill_transport_tago_node_id.py로 채움)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transport_latlng ON transport(lat, lng);
