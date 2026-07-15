@@ -99,12 +99,6 @@ def _load_stop_coords(cur):
     )}
 
 
-def _load_tago_node_ids(cur):
-    return dict(cur.execute(
-        "SELECT stop_id, tago_node_id FROM transport WHERE tago_node_id IS NOT NULL"
-    ))
-
-
 def _load_route_meta(cur):
     """route_id -> (route_no, route_type)"""
     return {rid: (no, typ) for rid, no, typ in cur.execute(
@@ -306,7 +300,7 @@ def _cached_arrival(cache, tago_node_id, route_id):
     return cache[key]
 
 
-def _refine_legs_realtime(by_route, coords, tago_ids, arrival_cache, legs):
+def _refine_legs_realtime(by_route, coords, arrival_cache, legs):
     """각 구간의 ride_minutes/wait_minutes를 계산한다.
 
     - wait_minutes: legs[0](첫 승차 구간)만 실시간 도착예측을 조회한다. 사용자가
@@ -320,12 +314,11 @@ def _refine_legs_realtime(by_route, coords, tago_ids, arrival_cache, legs):
     refined = []
     for i, leg in enumerate(legs):
         static_ride = _static_leg_minutes(by_route, coords, leg)
-        board_tago = tago_ids.get(leg["board_stop_id"])
 
         wait_minutes = STATIC_WAIT_ESTIMATE_MIN
         wait_estimated = True
-        if i == 0 and board_tago:
-            live_wait = _cached_arrival(arrival_cache, board_tago, leg["route_id"])
+        if i == 0:
+            live_wait = _cached_arrival(arrival_cache, leg["board_stop_id"], leg["route_id"])
             if live_wait is not None:
                 wait_minutes = live_wait
                 wait_estimated = False
@@ -364,7 +357,6 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
     coords = _load_stop_coords(cur)
     grid = _load_stop_grid(coords)
     route_meta = _load_route_meta(cur)
-    tago_ids = _load_tago_node_ids(cur)
 
     from_place_out = {"name": origin["name"], "lat": origin["lat"], "lng": origin["lng"]}
     to_place_out = {"name": dest["name"], "lat": dest["lat"], "lng": dest["lng"]}
@@ -392,7 +384,7 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
     arrival_cache = {}
     finalized = []
     for p in deduped[:STATIC_PRUNE_KEEP]:
-        legs = _refine_legs_realtime(by_route, coords, tago_ids, arrival_cache, p["legs"])
+        legs = _refine_legs_realtime(by_route, coords, arrival_cache, p["legs"])
 
         # origin_stop(가장 가까운 정류소) 좌표가 아니라 origin(실제 장소) 좌표에서 측정한다 —
         # 승차 정류소가 origin_stop과 같은 흔한 경우 0.0으로 계산되어 실제 도보 접근

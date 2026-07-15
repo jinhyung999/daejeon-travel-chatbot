@@ -60,13 +60,13 @@ CREATE TABLE IF NOT EXISTS weather (
 );
 
 CREATE TABLE IF NOT EXISTS transport (
-  stop_id  TEXT PRIMARY KEY,
-  name     TEXT,
-  type     TEXT,
-  lat      REAL,
-  lng      REAL,
-  routes   TEXT,
-  tago_node_id TEXT   -- TAGO 실시간 도착예측 API 조회용 원본 nodeId (scripts/backfill_transport_tago_node_id.py로 채움)
+  stop_id    TEXT PRIMARY KEY,     -- TAGO nodeId (예: DJB8005621)
+  name       TEXT NOT NULL,
+  type       TEXT NOT NULL DEFAULT 'bus',
+  lat        REAL NOT NULL,
+  lng        REAL NOT NULL,
+  routes     TEXT,                 -- bus_route_stop에서 파생한 표시용 캐시
+  source_api TEXT NOT NULL DEFAULT 'tago' CHECK (source_api = 'tago')
 );
 
 CREATE INDEX IF NOT EXISTS idx_transport_latlng ON transport(lat, lng);
