@@ -36,6 +36,12 @@ def _pick_best(rows):
 def resolve_place(name: str) -> dict | None:
     """장소명으로 place 테이블을 조회해 좌표를 반환한다.
     완전일치 -> 부분일치 순으로 시도하고, 못 찾으면 None을 반환한다."""
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name:
+        return None
+
     conn = _get_conn()
     cur = conn.cursor()
 
