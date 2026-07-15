@@ -64,11 +64,12 @@ def nearest_stops(lat: float, lng: float, k: int = NEAREST_STOP_K, max_km: float
     """주어진 좌표에서 가까운 버스정류소 k개 (직선거리 기준)"""
     conn = _get_conn()
     cur = conn.cursor()
-    deg = max_km / 111.0
+    lat_deg = max_km / 111.0
+    lng_deg = max_km / (111.0 * math.cos(math.radians(lat)))
     rows = cur.execute(
         """SELECT stop_id, name, lat, lng FROM transport
            WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?""",
-        (lat - deg, lat + deg, lng - deg, lng + deg),
+        (lat - lat_deg, lat + lat_deg, lng - lng_deg, lng + lng_deg),
     ).fetchall()
     conn.close()
 
@@ -383,7 +384,8 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
 
     arrival_cache = {}
     finalized = []
-    for p in deduped[:STATIC_PRUNE_KEEP]:
+    realtime_candidate_limit = min(STATIC_PRUNE_KEEP, max(0, max_results))
+    for p in deduped[:realtime_candidate_limit]:
         legs = _refine_legs_realtime(by_route, coords, arrival_cache, p["legs"])
 
         # origin_stop(가장 가까운 정류소) 좌표가 아니라 origin(실제 장소) 좌표에서 측정한다 —

@@ -20,7 +20,7 @@ CITY_CODE = 25  # 대전광역시
 ARRIVAL_URL = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
 
 
-def _request_with_retry(url, params, max_retry=2, timeout=5):
+def _request_with_retry(url, params, max_retry=1, timeout=2):
     """실시간 조회는 대화형 상황에서 호출되므로, collectors/common.py의
     request_with_retry(최대 3회, 지수백오프)보다 짧은 타임아웃/재시도로 빠르게 실패한다."""
     for attempt in range(max_retry):
@@ -39,6 +39,9 @@ def get_arrival_minutes(tago_node_id: str, route_id: str) -> float | None:
     """특정 정류소(TAGO nodeId)에서 특정 노선(TAGO routeId)의 다음 버스가
     몇 분 후 도착 예정인지 조회한다. 실시간 데이터가 없거나(운행 종료 등)
     요청 자체가 실패하면 None을 반환한다."""
+    if not TAGO_API_KEY:
+        return None
+
     resp = _request_with_retry(ARRIVAL_URL, {
         "serviceKey": TAGO_API_KEY,
         "cityCode": CITY_CODE,
