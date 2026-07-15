@@ -291,3 +291,181 @@ def _score_path_static(by_route, coords, from_stop, to_lat, to_lng, path):
     last_alight_coord = coords.get(legs[-1]["alight_stop_id"])
     total += _walk_minutes(*(last_alight_coord or (None, None)), to_lat, to_lng)
     return total
+
+
+def _cached_arrival(cache, tago_node_id, route_id):
+    key = (tago_node_id, route_id)
+    if key not in cache:
+        cache[key] = get_arrival_minutes(tago_node_id, route_id)
+    return cache[key]
+
+
+def _refine_legs_realtime(by_route, coords, tago_ids, arrival_cache, legs):
+    """각 구간의 ride_minutes/wait_minutes를 계산한다.
+
+    - wait_minutes: legs[0](첫 승차 구간)만 실시간 도착예측을 조회한다. 사용자가
+      "지금" 그 정류소에 있다는 전제가 성립하므로 미래 시각 문제가 없다(문제점 4.4).
+      두 번째 이후 구간은 사용자가 아직 그 정류소에 도착하지 않았으므로 "지금" 조회한
+      값이 무의미할 수 있어(4.4 예시) 항상 정적 추정치를 사용한다.
+    - ride_minutes: 모든 구간에서 항상 정적 근사치를 사용한다. 서로 다른 정류장의
+      실시간 ETA를 빼서 승차시간을 구하는 방식은 차량 단위 교차검증 없이는 같은
+      차량인지 보장할 수 없어(문제점 4.3) 이 코드에 그 경로 자체가 없다.
+    """
+    refined = []
+    for i, leg in enumerate(legs):
+        static_ride = _static_leg_minutes(by_route, coords, leg)
+        board_tago = tago_ids.get(leg["board_stop_id"])
+
+        wait_minutes = STATIC_WAIT_ESTIMATE_MIN
+        wait_estimated = True
+        if i == 0 and board_tago:
+            live_wait = _cached_arrival(arrival_cache, board_tago, leg["route_id"])
+            if live_wait is not None:
+                wait_minutes = live_wait
+                wait_estimated = False
+
+        refined.append({
+            **leg,
+            "wait_minutes": wait_minutes,
+            "wait_estimated": wait_estimated,
+            "ride_minutes": static_ride,
+            "ride_estimated": True,
+        })
+    return refined
+
+
+def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MAX_TRANSFERS, max_results: int = 3) -> dict:
+    """두 장소 사이의 버스 동선을 최대 max_transfers회 환승까지 탐색해,
+    총 예상소요시간이 짧은 순으로 상위 max_results개를 반환한다.
+    예외를 던지지 않고 항상 dict를 반환한다."""
+    import datetime
+
+    origin = resolve_place(from_place)
+    if origin is None:
+        return {"error": "place_not_found", "query": from_place}
+    dest = resolve_place(to_place)
+    if dest is None:
+        return {"error": "place_not_found", "query": to_place}
+
+    from_stops = nearest_stops(origin["lat"], origin["lng"])
+    to_stops = nearest_stops(dest["lat"], dest["lng"])
+    if not from_stops:
+        return {"error": "no_nearby_stop", "which": "from"}
+    if not to_stops:
+        return {"error": "no_nearby_stop", "which": "to"}
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    by_route, by_stop = _load_route_graph(cur)
+    coords = _load_stop_coords(cur)
+    grid = _load_stop_grid(coords)
+    route_meta = _load_route_meta(cur)
+    tago_ids = _load_tago_node_ids(cur)
+
+    from_place_out = {"name": origin["name"], "lat": origin["lat"], "lng": origin["lng"]}
+    to_place_out = {"name": dest["name"], "lat": dest["lat"], "lng": dest["lng"]}
+    calculated_at = datetime.datetime.now().isoformat(timespec="seconds")
+
+    candidates = _search_candidate_paths(by_route, by_stop, coords, grid, from_stops, to_stops, max_transfers)
+    if not candidates:
+        conn.close()
+        return {"from_place": from_place_out, "to_place": to_place_out, "calculated_at": calculated_at,
+                 "routes": [], "reason": "no_route_found"}
+
+    scored = sorted(
+        candidates,
+        key=lambda p: _score_path_static(by_route, coords, p["origin_stop"], dest["lat"], dest["lng"], p),
+    )
+
+    deduped, seen_sequences = [], set()
+    for p in scored:
+        seq = tuple((leg["route_id"], leg["updowncd"], leg["board_stop_id"], leg["alight_stop_id"]) for leg in p["legs"])
+        if seq in seen_sequences:
+            continue
+        seen_sequences.add(seq)
+        deduped.append(p)
+
+    arrival_cache = {}
+    finalized = []
+    for p in deduped[:STATIC_PRUNE_KEEP]:
+        legs = _refine_legs_realtime(by_route, coords, tago_ids, arrival_cache, p["legs"])
+
+        walk_to_board = _walk_minutes(p["origin_stop"]["lat"], p["origin_stop"]["lng"],
+                                       *(coords.get(legs[0]["board_stop_id"]) or (None, None)))
+        last_alight_coord = coords.get(legs[-1]["alight_stop_id"])
+        walk_from_last = _walk_minutes(*(last_alight_coord or (None, None)), dest["lat"], dest["lng"])
+
+        total = walk_to_board
+        total_walk = walk_to_board + walk_from_last
+        prev_alight = None
+        for leg in legs:
+            if prev_alight is not None and prev_alight != leg["board_stop_id"]:
+                leg["walk_transfer_minutes"] = _walk_minutes(
+                    *(coords.get(prev_alight) or (None, None)),
+                    *(coords.get(leg["board_stop_id"]) or (None, None)),
+                )
+            else:
+                leg["walk_transfer_minutes"] = 0.0
+            total += leg["walk_transfer_minutes"]
+            total_walk += leg["walk_transfer_minutes"]
+            total += leg["wait_minutes"]
+            total += leg["ride_minutes"]
+            prev_alight = leg["alight_stop_id"]
+        total += walk_from_last
+
+        realtime_components = sum(1 for leg in legs if not leg["wait_estimated"])
+        total_components = 2 * len(legs)  # 구간마다 wait+ride 두 요소
+        realtime_coverage = realtime_components / total_components if total_components else 0.0
+        estimated = any(leg["wait_estimated"] or leg["ride_estimated"] for leg in legs)
+
+        finalized.append({
+            "total_minutes": total, "transfer_count": len(legs) - 1,
+            "legs": legs, "walk_to_board_minutes": walk_to_board,
+            "walk_from_last_stop_minutes": walk_from_last,
+            "total_walk_minutes": total_walk,
+            "estimated": estimated, "realtime_coverage": realtime_coverage,
+        })
+
+    finalized.sort(key=lambda r: (
+        round(r["total_minutes"] / 3), r["transfer_count"], r["total_walk_minutes"], r["total_minutes"]
+    ))
+
+    routes_out = []
+    for r in finalized[:max_results]:
+        legs_out = []
+        for i, leg in enumerate(r["legs"]):
+            route_no, route_type = route_meta.get(leg["route_id"], (leg["route_id"], None))
+            legs_out.append({
+                "route_id": leg["route_id"], "route_no": route_no, "route_type": route_type,
+                "updowncd": leg["updowncd"],
+                "board_stop_id": leg["board_stop_id"], "board_stop": _text_name(cur, leg["board_stop_id"]),
+                "board_order": leg["board_order"],
+                "wait_minutes": round(leg["wait_minutes"], 1), "wait_estimated": leg["wait_estimated"],
+                "alight_stop_id": leg["alight_stop_id"], "alight_stop": _text_name(cur, leg["alight_stop_id"]),
+                "alight_order": leg["alight_order"],
+                "ride_minutes": round(leg["ride_minutes"], 1), "ride_estimated": leg["ride_estimated"],
+                "walk_transfer_minutes": round(leg["walk_transfer_minutes"], 1),
+            })
+
+        routes_out.append({
+            "total_minutes": round(r["total_minutes"], 1),
+            "transfer_count": r["transfer_count"],
+            "estimated": r["estimated"],
+            "realtime_coverage": round(r["realtime_coverage"], 2),
+            "walk_to_board_minutes": round(r["walk_to_board_minutes"], 1),
+            "walk_from_last_stop_minutes": round(r["walk_from_last_stop_minutes"], 1),
+            "legs": legs_out,
+        })
+
+    conn.close()
+    return {"from_place": from_place_out, "to_place": to_place_out, "calculated_at": calculated_at, "routes": routes_out}
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+    if len(sys.argv) == 3:
+        result = recommend_bus_routes(sys.argv[1], sys.argv[2])
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("사용법: python transit.py <출발지명> <도착지명>")
