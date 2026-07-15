@@ -15,6 +15,7 @@
 #     교차검증할 방법이 없어(범위 밖) 항상 정적 근사치를 사용한다.
 # =====================================================
 
+import datetime
 import math
 import sqlite3
 from pathlib import Path
@@ -273,11 +274,16 @@ def _walk_minutes(lat1, lng1, lat2, lng2):
     return estimate_minutes(road_distance_km(lat1, lng1, lat2, lng2), "walk")
 
 
-def _score_path_static(by_route, coords, from_stop, to_lat, to_lng, path):
-    """1단계 근사치 총소요시간(분). 실시간 API 호출 없이 가지치기/1차 순위용으로만 사용."""
+def _score_path_static(by_route, coords, origin_lat, origin_lng, to_lat, to_lng, path):
+    """1단계 근사치 총소요시간(분). 실시간 API 호출 없이 가지치기/1차 순위용으로만 사용.
+
+    origin_lat/origin_lng는 사용자가 입력한 장소(resolve_place 결과)의 좌표여야 한다.
+    origin_stop(BFS 탐색 시작점인 가장 가까운 정류소) 좌표를 쓰면 그 정류소가 곧
+    첫 승차 정류소인 흔한 경우 walk_to_board가 0으로 계산되어 실제 도보 접근
+    시간이 누락되고, 후보 간 비교도 왜곡된다."""
     legs = path["legs"]
     first_board_coord = coords.get(legs[0]["board_stop_id"])
-    total = _walk_minutes(from_stop["lat"], from_stop["lng"], *(first_board_coord or (None, None)))
+    total = _walk_minutes(origin_lat, origin_lng, *(first_board_coord or (None, None)))
 
     prev_alight = None
     for leg in legs:
@@ -338,8 +344,6 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
     """두 장소 사이의 버스 동선을 최대 max_transfers회 환승까지 탐색해,
     총 예상소요시간이 짧은 순으로 상위 max_results개를 반환한다.
     예외를 던지지 않고 항상 dict를 반환한다."""
-    import datetime
-
     origin = resolve_place(from_place)
     if origin is None:
         return {"error": "place_not_found", "query": from_place}
@@ -374,7 +378,7 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
 
     scored = sorted(
         candidates,
-        key=lambda p: _score_path_static(by_route, coords, p["origin_stop"], dest["lat"], dest["lng"], p),
+        key=lambda p: _score_path_static(by_route, coords, origin["lat"], origin["lng"], dest["lat"], dest["lng"], p),
     )
 
     deduped, seen_sequences = [], set()
@@ -390,7 +394,10 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
     for p in deduped[:STATIC_PRUNE_KEEP]:
         legs = _refine_legs_realtime(by_route, coords, tago_ids, arrival_cache, p["legs"])
 
-        walk_to_board = _walk_minutes(p["origin_stop"]["lat"], p["origin_stop"]["lng"],
+        # origin_stop(가장 가까운 정류소) 좌표가 아니라 origin(실제 장소) 좌표에서 측정한다 —
+        # 승차 정류소가 origin_stop과 같은 흔한 경우 0.0으로 계산되어 실제 도보 접근
+        # 시간이 누락되는 것을 막기 위함(최종 리뷰 Important #1).
+        walk_to_board = _walk_minutes(origin["lat"], origin["lng"],
                                        *(coords.get(legs[0]["board_stop_id"]) or (None, None)))
         last_alight_coord = coords.get(legs[-1]["alight_stop_id"])
         walk_from_last = _walk_minutes(*(last_alight_coord or (None, None)), dest["lat"], dest["lng"])
@@ -416,6 +423,10 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
         realtime_components = sum(1 for leg in legs if not leg["wait_estimated"])
         total_components = 2 * len(legs)  # 구간마다 wait+ride 두 요소
         realtime_coverage = realtime_components / total_components if total_components else 0.0
+        # ride_estimated는 설계상(모듈 docstring 참고) 모든 구간에서 항상 True이므로
+        # estimated도 non-empty 경로에서는 수학적으로 항상 True다. 이는 의도된
+        # 동작이다 — ride_minutes를 실시간화하면 안 되는 설계 제약(문제점 4.3)의
+        # 결과이니 "고쳐서" wait만 보게 만들지 말 것.
         estimated = any(leg["wait_estimated"] or leg["ride_estimated"] for leg in legs)
 
         finalized.append({
@@ -433,7 +444,7 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
     routes_out = []
     for r in finalized[:max_results]:
         legs_out = []
-        for i, leg in enumerate(r["legs"]):
+        for leg in r["legs"]:
             route_no, route_type = route_meta.get(leg["route_id"], (leg["route_id"], None))
             legs_out.append({
                 "route_id": leg["route_id"], "route_no": route_no, "route_type": route_type,

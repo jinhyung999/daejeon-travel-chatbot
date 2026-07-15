@@ -68,7 +68,10 @@ def get_arrival_minutes(tago_node_id: str, route_id: str) -> float | None:
         if it.get("routeid") == route_id:
             arrtime = it.get("arrtime")
             if arrtime is not None:
-                return arrtime / 60
+                try:
+                    return float(arrtime) / 60
+                except (TypeError, ValueError):
+                    return None
 
     return None
 
