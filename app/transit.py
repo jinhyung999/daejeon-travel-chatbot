@@ -20,6 +20,7 @@ import math
 import sqlite3
 from pathlib import Path
 
+from bus_graph import static_segment_minutes
 from geo import CAR_SPEED_KMH, estimate_minutes, haversine_km, road_distance_km
 from place_lookup import resolve_place
 from realtime_bus import get_arrival_minutes
@@ -248,10 +249,18 @@ def _search_candidate_paths(by_route, by_stop, coords, grid, from_stops, to_stop
     return completed
 
 
-def _static_leg_minutes(by_route, coords, leg):
+def _static_leg_minutes(by_route, coords, leg, graph=None):
     """구간의 정류소 순서대로 좌표 거리를 누적해 평균속도(CAR_SPEED_KMH)로 환산한 근사 소요시간(분).
     실제 도로 굴곡·신호대기 등은 반영하지 않는 근사치다(문제점 4.5) — 최종 결과에서
     항상 ride_estimated=True로 표시해 신뢰도 오인을 방지한다."""
+    if graph is not None:
+        return static_segment_minutes(
+            graph,
+            leg["route_id"],
+            leg["updowncd"],
+            leg["board_order"],
+            leg["alight_order"],
+        )
     stops = [sid for o, sid in by_route[(leg["route_id"], leg["updowncd"])]
              if leg["board_order"] <= o <= leg["alight_order"]]
     total_km = 0.0
