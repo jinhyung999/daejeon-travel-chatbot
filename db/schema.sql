@@ -115,3 +115,66 @@ CREATE TABLE IF NOT EXISTS course_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_course_log_fallback ON course_log(fallback_type);
+
+CREATE TABLE IF NOT EXISTS subway_line (
+  line_id TEXT PRIMARY KEY,
+  name_ko TEXT NOT NULL,
+  name_en TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subway_station (
+  station_id TEXT PRIMARY KEY,
+  line_id TEXT NOT NULL REFERENCES subway_line(line_id) ON DELETE CASCADE,
+  station_no INTEGER NOT NULL UNIQUE CHECK (station_no BETWEEN 101 AND 122),
+  name_ko TEXT NOT NULL,
+  name_en TEXT NOT NULL,
+  address TEXT,
+  lat REAL NOT NULL CHECK (lat BETWEEN -90 AND 90),
+  lng REAL NOT NULL CHECK (lng BETWEEN -180 AND 180),
+  coordinate_source TEXT NOT NULL CHECK (coordinate_source = 'derived_bus_stops')
+);
+
+CREATE INDEX IF NOT EXISTS idx_subway_station_line_no ON subway_station(line_id, station_no);
+CREATE INDEX IF NOT EXISTS idx_subway_station_latlng ON subway_station(lat, lng);
+
+CREATE TABLE IF NOT EXISTS subway_edge (
+  line_id TEXT NOT NULL REFERENCES subway_line(line_id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK (sequence BETWEEN 1 AND 21),
+  from_station_id TEXT NOT NULL REFERENCES subway_station(station_id),
+  to_station_id TEXT NOT NULL REFERENCES subway_station(station_id),
+  travel_seconds INTEGER NOT NULL CHECK (travel_seconds > 0),
+  distance_km REAL NOT NULL CHECK (distance_km > 0),
+  PRIMARY KEY (line_id, sequence),
+  UNIQUE (line_id, from_station_id, to_station_id),
+  CHECK (from_station_id <> to_station_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_subway_edge_from ON subway_edge(from_station_id);
+CREATE INDEX IF NOT EXISTS idx_subway_edge_to ON subway_edge(to_station_id);
+
+CREATE TABLE IF NOT EXISTS subway_schedule (
+  station_id TEXT NOT NULL REFERENCES subway_station(station_id) ON DELETE CASCADE,
+  day_type TEXT NOT NULL CHECK (day_type IN ('01', '02', '03')),
+  direction TEXT NOT NULL CHECK (direction IN ('up', 'down')),
+  train_no TEXT NOT NULL,
+  arrival_time TEXT CHECK (
+    arrival_time IS NULL OR (length(arrival_time) = 6 AND arrival_time NOT GLOB '*[^0-9]*')
+  ),
+  departure_time TEXT NOT NULL CHECK (
+    length(departure_time) = 6 AND departure_time NOT GLOB '*[^0-9]*'
+  ),
+  PRIMARY KEY (station_id, day_type, direction, train_no, departure_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_subway_schedule_lookup
+  ON subway_schedule(station_id, day_type, direction, departure_time);
+
+CREATE TABLE IF NOT EXISTS transit_transfer (
+  station_id TEXT NOT NULL REFERENCES subway_station(station_id) ON DELETE CASCADE,
+  stop_id TEXT NOT NULL REFERENCES transport(stop_id) ON DELETE CASCADE,
+  distance_m REAL NOT NULL CHECK (distance_m >= 0 AND distance_m <= 600),
+  walking_minutes REAL NOT NULL CHECK (walking_minutes >= 0),
+  PRIMARY KEY (station_id, stop_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_transit_transfer_stop ON transit_transfer(stop_id);

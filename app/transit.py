@@ -10,9 +10,9 @@
 # (docs/superpowers/specs/2026-07-14-bus-route-multi-transfer-design.md v2 참고):
 #   1단계(_search_candidate_paths/_score_path_static): 정류소 거리×평균속도로
 #     빠른 근사치 계산 → 탐색 가지치기 + 1차 순위
-#   2단계(Task 4, realtime_bus.py 사용): 첫 승차 구간의 대기시간에만
-#     TAGO 실시간 도착예측을 적용. 승차시간(ride_minutes)은 서로 다른 차량을
-#     교차검증할 방법이 없어(범위 밖) 항상 정적 근사치를 사용한다.
+#   2단계(realtime_bus.py 사용): 첫 승차 구간에서 차량 위치로 체크포인트를
+#     선택하고 동일 노선의 두 ETA를 검증해 승차시간을 보정한다. 실패하거나
+#     검증 기준을 벗어나면 기존 정적 근사치로 안전하게 폴백한다.
 # =====================================================
 
 import datetime
@@ -20,9 +20,10 @@ import math
 import sqlite3
 from pathlib import Path
 
+from bus_graph import get_bus_graph, static_segment_minutes
 from geo import CAR_SPEED_KMH, estimate_minutes, haversine_km, road_distance_km
 from place_lookup import resolve_place
-from realtime_bus import get_arrival_minutes
+from realtime_bus import get_arrival_info, get_route_vehicle_locations
 
 DB_PATH = Path(__file__).parent.parent / "db" / "travel.db"
 
@@ -37,6 +38,9 @@ ALLOWED_DETOUR_KM = 1.5        # 다음 정류소가 목적지에서 이만큼 �
 TRANSFER_PENALTY_KM_EQUIV = 0.3  # 빔 정렬 시 구간 수에 곱해 더하는 페널티(거리 환산)
 TRANSFER_WALK_RADIUS_M = 200   # 서로 다른 nodeId 사이 도보환승을 허용하는 반경
 MAX_NEARBY_TRANSFER_STOPS = 4  # 도보환승 후보로 추가하는 인근 정류소 최대 개수
+LIVE_STATIC_RATIO_MIN = 0.4
+LIVE_STATIC_RATIO_MAX = 2.5
+ARRIVAL_COUNT_TOLERANCE = 2
 
 # 도보환승 검색용 공간 격자 한 칸 크기(도 단위).
 # _nearby_stop_ids는 ±1 이웃 셀만 검색하므로, 반경 radius_m 이내의 두 점이
@@ -248,10 +252,18 @@ def _search_candidate_paths(by_route, by_stop, coords, grid, from_stops, to_stop
     return completed
 
 
-def _static_leg_minutes(by_route, coords, leg):
+def _static_leg_minutes(by_route, coords, leg, graph=None):
     """구간의 정류소 순서대로 좌표 거리를 누적해 평균속도(CAR_SPEED_KMH)로 환산한 근사 소요시간(분).
     실제 도로 굴곡·신호대기 등은 반영하지 않는 근사치다(문제점 4.5) — 최종 결과에서
     항상 ride_estimated=True로 표시해 신뢰도 오인을 방지한다."""
+    if graph is not None:
+        return static_segment_minutes(
+            graph,
+            leg["route_id"],
+            leg["updowncd"],
+            leg["board_order"],
+            leg["alight_order"],
+        )
     stops = [sid for o, sid in by_route[(leg["route_id"], leg["updowncd"])]
              if leg["board_order"] <= o <= leg["alight_order"]]
     total_km = 0.0
@@ -269,7 +281,7 @@ def _walk_minutes(lat1, lng1, lat2, lng2):
     return estimate_minutes(road_distance_km(lat1, lng1, lat2, lng2), "walk")
 
 
-def _score_path_static(by_route, coords, origin_lat, origin_lng, to_lat, to_lng, path):
+def _score_path_static(by_route, coords, origin_lat, origin_lng, to_lat, to_lng, path, graph=None):
     """1단계 근사치 총소요시간(분). 실시간 API 호출 없이 가지치기/1차 순위용으로만 사용.
 
     origin_lat/origin_lng는 사용자가 입력한 장소(resolve_place 결과)의 좌표여야 한다.
@@ -286,7 +298,7 @@ def _score_path_static(by_route, coords, origin_lat, origin_lng, to_lat, to_lng,
             total += _walk_minutes(*(coords.get(prev_alight) or (None, None)),
                                     *(coords.get(leg["board_stop_id"]) or (None, None)))
         total += STATIC_WAIT_ESTIMATE_MIN
-        total += _static_leg_minutes(by_route, coords, leg)
+        total += _static_leg_minutes(by_route, coords, leg, graph=graph)
         prev_alight = leg["alight_stop_id"]
 
     last_alight_coord = coords.get(legs[-1]["alight_stop_id"])
@@ -294,43 +306,211 @@ def _score_path_static(by_route, coords, origin_lat, origin_lng, to_lat, to_lng,
     return total
 
 
-def _cached_arrival(cache, tago_node_id, route_id):
-    key = (tago_node_id, route_id)
-    if key not in cache:
-        cache[key] = get_arrival_minutes(tago_node_id, route_id)
-    return cache[key]
+def _direction_order_set(direction_orders):
+    orders = set()
+    for item in direction_orders:
+        value = item[0] if isinstance(item, (tuple, list)) else item
+        try:
+            orders.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return orders
 
 
-def _refine_legs_realtime(by_route, coords, arrival_cache, legs):
-    """각 구간의 ride_minutes/wait_minutes를 계산한다.
+def _select_boarding_vehicle(vehicles, direction_orders, board_order):
+    """승차 정류소 직전의 유일한 최근접 차량을 선택한다."""
+    valid_orders = _direction_order_set(direction_orders)
+    candidates = []
+    for vehicle in vehicles:
+        try:
+            order = int(vehicle["node_order"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if order in valid_orders and order < board_order:
+            candidates.append((order, vehicle))
+    if not candidates:
+        return None
 
-    - wait_minutes: legs[0](첫 승차 구간)만 실시간 도착예측을 조회한다. 사용자가
-      "지금" 그 정류소에 있다는 전제가 성립하므로 미래 시각 문제가 없다(문제점 4.4).
-      두 번째 이후 구간은 사용자가 아직 그 정류소에 도착하지 않았으므로 "지금" 조회한
-      값이 무의미할 수 있어(4.4 예시) 항상 정적 추정치를 사용한다.
-    - ride_minutes: 모든 구간에서 항상 정적 근사치를 사용한다. 서로 다른 정류장의
-      실시간 ETA를 빼서 승차시간을 구하는 방식은 차량 단위 교차검증 없이는 같은
-      차량인지 보장할 수 없어(문제점 4.3) 이 코드에 그 경로 자체가 없다.
-    """
+    closest_order = max(order for order, _vehicle in candidates)
+    closest = [vehicle for order, vehicle in candidates if order == closest_order]
+    return closest[0] if len(closest) == 1 else None
+
+
+def _select_live_checkpoint(target, vehicles, direction_orders, board_order, alight_order):
+    """선택 차량과 바로 앞 차량 사이에서 실시간 ETA를 조회할 체크포인트를 정한다."""
+    if not target:
+        return None
+    valid_orders = _direction_order_set(direction_orders)
+    try:
+        target_order = int(target["node_order"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    target_vehicle_no = target.get("vehicle_no")
+    leading_orders = []
+    for vehicle in vehicles:
+        if target_vehicle_no and vehicle.get("vehicle_no") == target_vehicle_no:
+            continue
+        try:
+            order = int(vehicle["node_order"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if order in valid_orders and order > target_order:
+            leading_orders.append(order)
+    leading_order = min(leading_orders) if leading_orders else None
+    checkpoint_order = (
+        leading_order - 1
+        if leading_order is not None and leading_order <= alight_order
+        else alight_order
+    )
+    if checkpoint_order <= board_order or checkpoint_order not in valid_orders:
+        return None
+    return checkpoint_order
+
+
+def _calculate_live_ride(
+    board_info,
+    checkpoint_info,
+    board_order,
+    checkpoint_order,
+    static_live_minutes,
+    static_remainder_minutes,
+):
+    """두 ETA의 차이를 검증하고 나머지 정적 시간을 더한 승차시간을 반환한다."""
+    try:
+        board_minutes = float(board_info["minutes"])
+        checkpoint_minutes = float(checkpoint_info["minutes"])
+        if (
+            board_minutes < 0
+            or checkpoint_minutes < 0
+            or not math.isfinite(board_minutes)
+            or not math.isfinite(checkpoint_minutes)
+        ):
+            return None
+        live_minutes = checkpoint_minutes - board_minutes
+        arrival_count_delta = (
+            int(checkpoint_info["arrprevstationcnt"])
+            - int(board_info["arrprevstationcnt"])
+        )
+        static_live = float(static_live_minutes)
+        static_remainder = float(static_remainder_minutes)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    if live_minutes <= 0:
+        return None
+    expected_stop_delta = checkpoint_order - board_order
+    if abs(expected_stop_delta - arrival_count_delta) > ARRIVAL_COUNT_TOLERANCE:
+        return None
+    if static_live <= 0:
+        return None
+    ratio = live_minutes / static_live
+    if not LIVE_STATIC_RATIO_MIN <= ratio <= LIVE_STATIC_RATIO_MAX:
+        return None
+    return {
+        "ride_minutes": live_minutes + static_remainder,
+        "live_segment_minutes": live_minutes,
+        "static_remainder_minutes": static_remainder,
+    }
+
+
+def _refine_legs_realtime(by_route, coords, legs, graph=None):
+    """모든 구간을 정적 결과로 초기화한 뒤 첫 구간만 실시간 차량 ETA로 보정한다."""
     refined = []
-    for i, leg in enumerate(legs):
-        static_ride = _static_leg_minutes(by_route, coords, leg)
-
-        wait_minutes = STATIC_WAIT_ESTIMATE_MIN
-        wait_estimated = True
-        if i == 0:
-            live_wait = _cached_arrival(arrival_cache, leg["board_stop_id"], leg["route_id"])
-            if live_wait is not None:
-                wait_minutes = live_wait
-                wait_estimated = False
-
+    for leg in legs:
+        static_ride = _static_leg_minutes(by_route, coords, leg, graph=graph)
         refined.append({
             **leg,
-            "wait_minutes": wait_minutes,
-            "wait_estimated": wait_estimated,
+            "wait_minutes": STATIC_WAIT_ESTIMATE_MIN,
+            "wait_estimated": True,
             "ride_minutes": static_ride,
             "ride_estimated": True,
+            "ride_time_source": "static_stop_distance",
+            "vehicle_no": None,
+            "live_checkpoint_stop_id": None,
+            "live_checkpoint_stop": None,
+            "live_segment_minutes": 0.0,
+            "static_remainder_minutes": static_ride,
+            "confidence": "low",
         })
+
+    if not refined:
+        return refined
+
+    first_leg = legs[0]
+    first_result = refined[0]
+    try:
+        board_info = get_arrival_info(first_leg["board_stop_id"], first_leg["route_id"])
+    except Exception:
+        board_info = None
+    if board_info is not None:
+        try:
+            wait_minutes = float(board_info["minutes"])
+            if wait_minutes < 0 or not math.isfinite(wait_minutes):
+                board_info = None
+            else:
+                first_result["wait_minutes"] = wait_minutes
+                first_result["wait_estimated"] = False
+        except (KeyError, TypeError, ValueError):
+            board_info = None
+
+    try:
+        vehicles = get_route_vehicle_locations(first_leg["route_id"])
+        direction_stops = by_route[(first_leg["route_id"], first_leg["updowncd"])]
+        target = _select_boarding_vehicle(
+            vehicles, direction_stops, first_leg["board_order"]
+        )
+        checkpoint_order = _select_live_checkpoint(
+            target,
+            vehicles,
+            direction_stops,
+            first_leg["board_order"],
+            first_leg["alight_order"],
+        )
+        if board_info is None or checkpoint_order is None:
+            return refined
+
+        checkpoint_stop_id = next(
+            stop_id for order, stop_id in direction_stops if order == checkpoint_order
+        )
+        checkpoint_info = get_arrival_info(checkpoint_stop_id, first_leg["route_id"])
+        static_live = _static_leg_minutes(
+            by_route,
+            coords,
+            {**first_leg, "alight_order": checkpoint_order},
+            graph=graph,
+        )
+        static_remainder = _static_leg_minutes(
+            by_route,
+            coords,
+            {**first_leg, "board_order": checkpoint_order},
+            graph=graph,
+        )
+        live_ride = _calculate_live_ride(
+            board_info,
+            checkpoint_info,
+            first_leg["board_order"],
+            checkpoint_order,
+            static_live,
+            static_remainder,
+        )
+        if live_ride is None:
+            return refined
+
+        stop_names = graph.stop_names if graph is not None else {}
+        first_result.update({
+            **live_ride,
+            "ride_time_source": (
+                "live_checkpoint"
+                if checkpoint_order == first_leg["alight_order"]
+                else "live_checkpoint_plus_static"
+            ),
+            "vehicle_no": target.get("vehicle_no"),
+            "live_checkpoint_stop_id": checkpoint_stop_id,
+            "live_checkpoint_stop": stop_names.get(checkpoint_stop_id, checkpoint_stop_id),
+            "confidence": "medium",
+        })
+    except Exception:
+        return refined
     return refined
 
 
@@ -352,12 +532,13 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
     if not to_stops:
         return {"error": "no_nearby_stop", "which": "to"}
 
-    conn = _get_conn()
-    cur = conn.cursor()
-    by_route, by_stop = _load_route_graph(cur)
-    coords = _load_stop_coords(cur)
+    graph = get_bus_graph()
+    by_route = graph.by_route
+    by_stop = graph.by_stop
+    coords = graph.coords
     grid = _load_stop_grid(coords)
-    route_meta = _load_route_meta(cur)
+    route_meta = graph.route_meta
+    stop_names = graph.stop_names
 
     from_place_out = {"name": origin["name"], "lat": origin["lat"], "lng": origin["lng"]}
     to_place_out = {"name": dest["name"], "lat": dest["lat"], "lng": dest["lng"]}
@@ -365,13 +546,21 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
 
     candidates = _search_candidate_paths(by_route, by_stop, coords, grid, from_stops, to_stops, max_transfers)
     if not candidates:
-        conn.close()
         return {"from_place": from_place_out, "to_place": to_place_out, "calculated_at": calculated_at,
                  "routes": [], "reason": "no_route_found"}
 
     scored = sorted(
         candidates,
-        key=lambda p: _score_path_static(by_route, coords, origin["lat"], origin["lng"], dest["lat"], dest["lng"], p),
+        key=lambda p: _score_path_static(
+            by_route,
+            coords,
+            origin["lat"],
+            origin["lng"],
+            dest["lat"],
+            dest["lng"],
+            p,
+            graph=graph,
+        ),
     )
 
     deduped, seen_sequences = [], set()
@@ -382,11 +571,10 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
         seen_sequences.add(seq)
         deduped.append(p)
 
-    arrival_cache = {}
     finalized = []
     realtime_candidate_limit = min(STATIC_PRUNE_KEEP, max(0, max_results))
     for p in deduped[:realtime_candidate_limit]:
-        legs = _refine_legs_realtime(by_route, coords, arrival_cache, p["legs"])
+        legs = _refine_legs_realtime(by_route, coords, p["legs"], graph=graph)
 
         # origin_stop(가장 가까운 정류소) 좌표가 아니라 origin(실제 장소) 좌표에서 측정한다 —
         # 승차 정류소가 origin_stop과 같은 흔한 경우 0.0으로 계산되어 실제 도보 접근
@@ -417,10 +605,9 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
         realtime_components = sum(1 for leg in legs if not leg["wait_estimated"])
         total_components = 2 * len(legs)  # 구간마다 wait+ride 두 요소
         realtime_coverage = realtime_components / total_components if total_components else 0.0
-        # ride_estimated는 설계상(모듈 docstring 참고) 모든 구간에서 항상 True이므로
+        # ride_estimated는 호환성을 위해 모든 구간에서 항상 True이므로
         # estimated도 non-empty 경로에서는 수학적으로 항상 True다. 이는 의도된
-        # 동작이다 — ride_minutes를 실시간화하면 안 되는 설계 제약(문제점 4.3)의
-        # 결과이니 "고쳐서" wait만 보게 만들지 말 것.
+        # 동작이다. 체크포인트 ETA 보정 여부는 ride_time_source/confidence로 구분한다.
         estimated = any(leg["wait_estimated"] or leg["ride_estimated"] for leg in legs)
 
         finalized.append({
@@ -443,13 +630,22 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
             legs_out.append({
                 "route_id": leg["route_id"], "route_no": route_no, "route_type": route_type,
                 "updowncd": leg["updowncd"],
-                "board_stop_id": leg["board_stop_id"], "board_stop": _text_name(cur, leg["board_stop_id"]),
+                "board_stop_id": leg["board_stop_id"],
+                "board_stop": stop_names.get(leg["board_stop_id"], leg["board_stop_id"]),
                 "board_order": leg["board_order"],
                 "wait_minutes": round(leg["wait_minutes"], 1), "wait_estimated": leg["wait_estimated"],
-                "alight_stop_id": leg["alight_stop_id"], "alight_stop": _text_name(cur, leg["alight_stop_id"]),
+                "alight_stop_id": leg["alight_stop_id"],
+                "alight_stop": stop_names.get(leg["alight_stop_id"], leg["alight_stop_id"]),
                 "alight_order": leg["alight_order"],
                 "ride_minutes": round(leg["ride_minutes"], 1), "ride_estimated": leg["ride_estimated"],
                 "walk_transfer_minutes": round(leg["walk_transfer_minutes"], 1),
+                "ride_time_source": leg["ride_time_source"],
+                "vehicle_no": leg["vehicle_no"],
+                "live_checkpoint_stop_id": leg["live_checkpoint_stop_id"],
+                "live_checkpoint_stop": leg["live_checkpoint_stop"],
+                "live_segment_minutes": round(leg["live_segment_minutes"], 1),
+                "static_remainder_minutes": round(leg["static_remainder_minutes"], 1),
+                "confidence": leg["confidence"],
             })
 
         routes_out.append({
@@ -462,15 +658,33 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
             "legs": legs_out,
         })
 
-    conn.close()
     return {"from_place": from_place_out, "to_place": to_place_out, "calculated_at": calculated_at, "routes": routes_out}
+
+
+def recommend_transit_routes(
+    from_place: str,
+    to_place: str,
+    max_legs: int = 3,
+    max_results: int = 3,
+    departure_at=None,
+) -> dict:
+    """Lazily load the multimodal router while preserving bus-only imports."""
+    from multimodal_transit import recommend_transit_routes as recommend
+
+    return recommend(
+        from_place,
+        to_place,
+        max_legs=max_legs,
+        max_results=max_results,
+        departure_at=departure_at,
+    )
 
 
 if __name__ == "__main__":
     import json
     import sys
     if len(sys.argv) == 3:
-        result = recommend_bus_routes(sys.argv[1], sys.argv[2])
+        result = recommend_transit_routes(sys.argv[1], sys.argv[2])
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print("사용법: python transit.py <출발지명> <도착지명>")
