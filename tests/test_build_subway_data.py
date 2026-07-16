@@ -6,6 +6,7 @@ import unittest
 import uuid
 from pathlib import Path
 
+from scripts import build_subway_data as builder
 from scripts.build_subway_data import apply_snapshot, build_snapshot
 
 
@@ -191,9 +192,117 @@ class SubwayDataBuilderTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_snapshot_without_transfer_for_one_station_can_be_applied(self):
+        snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+        snapshot["transfers"] = [
+            row for row in snapshot["transfers"] if row["station_id"] != "DJM122"
+        ]
+
+        apply_snapshot(snapshot, self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT count(*) FROM transit_transfer WHERE station_id = 'DJM122'"
+                ).fetchone()[0],
+            )
+        finally:
+            connection.close()
+
+    def test_missing_database_dry_run_does_not_create_a_file(self):
+        missing_db = self.root / f"{self.prefix}_missing.db"
+
+        with self.assertRaisesRegex(ValueError, "bus stops|database|transport"):
+            build_snapshot(self.station_csv, self.edge_csv, missing_db)
+
+        self.assertFalse(missing_db.exists())
+
+    def test_backup_uses_live_sqlite_snapshot_including_uncheckpointed_wal(self):
+        writer = sqlite3.connect(self.db_path)
+        writer.execute("PRAGMA journal_mode = WAL")
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        writer.execute("CREATE TABLE preapply_marker (value TEXT NOT NULL)")
+        writer.execute("INSERT INTO preapply_marker VALUES ('from-wal')")
+        writer.commit()
+        try:
+            snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+            backup = apply_snapshot(snapshot, self.db_path)
+        finally:
+            writer.close()
+
+        backup_connection = sqlite3.connect(backup)
+        try:
+            self.assertEqual(
+                "from-wal",
+                backup_connection.execute("SELECT value FROM preapply_marker").fetchone()[0],
+            )
+            self.assertEqual(
+                0,
+                backup_connection.execute(
+                    "SELECT count(*) FROM sqlite_master WHERE name = 'subway_line'"
+                ).fetchone()[0],
+            )
+        finally:
+            backup_connection.close()
+
+    def test_runtime_and_schema_file_create_identical_subway_objects(self):
+        schema_path = Path(__file__).parents[1] / "db" / "schema.sql"
+        runtime_db = self.root / f"{self.prefix}_runtime-schema.db"
+        file_db = self.root / f"{self.prefix}_file-schema.db"
+
+        def create_objects(path, sql, needs_transport):
+            connection = sqlite3.connect(path)
+            try:
+                if needs_transport:
+                    connection.execute("CREATE TABLE transport (stop_id TEXT PRIMARY KEY)")
+                connection.executescript(sql)
+                rows = connection.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "WHERE (tbl_name LIKE 'subway_%' OR tbl_name = 'transit_transfer') "
+                    "AND type IN ('table', 'index') "
+                    "ORDER BY type, name"
+                ).fetchall()
+            finally:
+                connection.close()
+            return [
+                (
+                    kind,
+                    name,
+                    table_name,
+                    None if sql_text is None else ''.join(sql_text.lower().split()),
+                )
+                for kind, name, table_name, sql_text in rows
+            ]
+
+        runtime_objects = create_objects(runtime_db, builder.SUBWAY_SCHEMA_SQL, True)
+        file_objects = create_objects(file_db, schema_path.read_text(encoding="utf-8"), False)
+
+        self.assertEqual(file_objects, runtime_objects)
+
     def test_database_failure_rolls_back_all_replacement_rows(self):
         snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
         apply_snapshot(snapshot, self.db_path)
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            "INSERT INTO subway_schedule VALUES "
+            "('DJM101', '01', 'up', 'T1', '080000', '080100')"
+        )
+        connection.commit()
+        tables = (
+            "subway_line",
+            "subway_station",
+            "subway_edge",
+            "subway_schedule",
+            "transit_transfer",
+        )
+        before = {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in tables
+        }
+        connection.close()
         invalid = copy.deepcopy(snapshot)
         invalid["transfers"][0]["stop_id"] = "MISSING-BUS-STOP"
 
@@ -202,14 +311,11 @@ class SubwayDataBuilderTest(unittest.TestCase):
 
         connection = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(22, connection.execute("SELECT count(*) FROM subway_station").fetchone()[0])
-            self.assertEqual(21, connection.execute("SELECT count(*) FROM subway_edge").fetchone()[0])
-            self.assertEqual(
-                0,
-                connection.execute(
-                    "SELECT count(*) FROM transit_transfer WHERE stop_id = 'MISSING-BUS-STOP'"
-                ).fetchone()[0],
-            )
+            after = {
+                table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                for table in tables
+            }
+            self.assertEqual(before, after)
         finally:
             connection.close()
 

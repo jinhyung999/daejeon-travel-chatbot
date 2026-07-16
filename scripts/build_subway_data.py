@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import math
-import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +16,7 @@ LINE_ID = "DJM1"
 EXPECTED_STATION_NUMBERS = list(range(101, 123))
 TRANSFER_RADIUS_M = 600.0
 
-SCHEMA_SQL = """
+SUBWAY_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS subway_line (
   line_id TEXT PRIMARY KEY,
   name_ko TEXT NOT NULL,
@@ -126,7 +125,8 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 def _load_bus_stops(db_path: Path) -> list[dict[str, object]]:
     try:
-        connection = sqlite3.connect(db_path)
+        database_uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(database_uri, uri=True)
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             "SELECT stop_id, name, lat, lng FROM transport WHERE type = 'bus'"
@@ -165,9 +165,6 @@ def _validate_snapshot(snapshot: dict) -> None:
     }
     if actual_edges != expected_edges or len(actual_edges) != 21:
         raise ValueError("edges must be the 21 unique adjacent station pairs")
-    station_ids = {station["station_id"] for station in stations}
-    if {row["station_id"] for row in transfers} != station_ids:
-        raise ValueError("every station must have at least one transfer")
     if any(not (0 <= float(row["distance_m"]) <= TRANSFER_RADIUS_M) for row in transfers):
         raise ValueError("transfer distance exceeds 600 metres")
 
@@ -289,15 +286,22 @@ def apply_snapshot(snapshot: dict, db_path: Path) -> Path:
     db_path = Path(db_path)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backup_path = db_path.with_name(f"{db_path.name}.backup-{timestamp}")
-    shutil.copy2(db_path, backup_path)
 
     connection = sqlite3.connect(db_path)
     connection.execute("PRAGMA foreign_keys = ON")
     try:
         connection.execute("BEGIN IMMEDIATE")
+        source_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        source_connection = sqlite3.connect(source_uri, uri=True)
+        backup_connection = sqlite3.connect(backup_path)
+        try:
+            source_connection.backup(backup_connection)
+        finally:
+            backup_connection.close()
+            source_connection.close()
         # executescript() implicitly commits; execute statements individually so
         # table creation and replacement remain inside this immediate transaction.
-        for statement in SCHEMA_SQL.split(";"):
+        for statement in SUBWAY_SCHEMA_SQL.split(";"):
             if statement.strip():
                 connection.execute(statement)
         for table in ("transit_transfer", "subway_schedule", "subway_edge", "subway_station", "subway_line"):
