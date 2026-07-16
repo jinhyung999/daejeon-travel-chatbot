@@ -661,11 +661,30 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
     return {"from_place": from_place_out, "to_place": to_place_out, "calculated_at": calculated_at, "routes": routes_out}
 
 
+def recommend_transit_routes(
+    from_place: str,
+    to_place: str,
+    max_legs: int = 3,
+    max_results: int = 3,
+    departure_at=None,
+) -> dict:
+    """Lazily load the multimodal router while preserving bus-only imports."""
+    from multimodal_transit import recommend_transit_routes as recommend
+
+    return recommend(
+        from_place,
+        to_place,
+        max_legs=max_legs,
+        max_results=max_results,
+        departure_at=departure_at,
+    )
+
+
 if __name__ == "__main__":
     import json
     import sys
     if len(sys.argv) == 3:
-        result = recommend_bus_routes(sys.argv[1], sys.argv[2])
+        result = recommend_transit_routes(sys.argv[1], sys.argv[2])
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print("사용법: python transit.py <출발지명> <도착지명>")
