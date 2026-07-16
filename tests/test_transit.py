@@ -154,6 +154,20 @@ class FirstLegRealtimeIntegrationTest(unittest.TestCase):
             self.assertGreater(leg["ride_minutes"], 0)
             self.assertEqual("low", leg["confidence"])
 
+    def test_invalid_board_eta_keeps_static_wait(self):
+        for invalid_eta in (-1, float("nan"), float("inf")):
+            with self.subTest(invalid_eta=invalid_eta), patch.object(
+                transit,
+                "get_arrival_info",
+                return_value={"minutes": invalid_eta, "arrprevstationcnt": 2},
+            ), patch.object(transit, "get_route_vehicle_locations", return_value=[]):
+                refined = transit._refine_legs_realtime(
+                    self.by_route, self.coords, self.legs, graph=self.graph
+                )
+
+            self.assertEqual(5, refined[0]["wait_minutes"])
+            self.assertTrue(refined[0]["wait_estimated"])
+
 
 class LiveCheckpointCalculationTest(unittest.TestCase):
     def test_selects_unique_vehicle_closest_before_board_order(self):
@@ -197,6 +211,20 @@ class LiveCheckpointCalculationTest(unittest.TestCase):
 
         self.assertEqual(18, checkpoint)
 
+    def test_checkpoint_ignores_duplicate_location_for_target_vehicle(self):
+        target = {"vehicle_no": "target", "node_order": 8}
+        vehicles = [
+            target,
+            {"vehicle_no": "target", "node_order": 15},
+            {"vehicle_no": "front", "node_order": 17},
+        ]
+
+        checkpoint = transit._select_live_checkpoint(
+            target, vehicles, set(range(1, 19)), board_order=10, alight_order=18
+        )
+
+        self.assertEqual(16, checkpoint)
+
     def test_live_ride_adds_checkpoint_delta_and_static_remainder(self):
         result = transit._calculate_live_ride(
             {"minutes": 5, "arrprevstationcnt": 2},
@@ -227,6 +255,20 @@ class LiveCheckpointCalculationTest(unittest.TestCase):
         )
 
         self.assertIsNone(result)
+
+    def test_live_ride_rejects_negative_and_non_finite_eta(self):
+        for invalid_eta in (-1, float("nan"), float("inf")):
+            with self.subTest(invalid_eta=invalid_eta):
+                result = transit._calculate_live_ride(
+                    {"minutes": invalid_eta, "arrprevstationcnt": 2},
+                    {"minutes": 8, "arrprevstationcnt": 6},
+                    board_order=10,
+                    checkpoint_order=14,
+                    static_live_minutes=8,
+                    static_remainder_minutes=7,
+                )
+
+                self.assertIsNone(result)
 
 
 if __name__ == "__main__":

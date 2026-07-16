@@ -345,9 +345,11 @@ def _select_live_checkpoint(target, vehicles, direction_orders, board_order, ali
         target_order = int(target["node_order"])
     except (KeyError, TypeError, ValueError):
         return None
-
+    target_vehicle_no = target.get("vehicle_no")
     leading_orders = []
     for vehicle in vehicles:
+        if target_vehicle_no and vehicle.get("vehicle_no") == target_vehicle_no:
+            continue
         try:
             order = int(vehicle["node_order"])
         except (KeyError, TypeError, ValueError):
@@ -375,7 +377,16 @@ def _calculate_live_ride(
 ):
     """두 ETA의 차이를 검증하고 나머지 정적 시간을 더한 승차시간을 반환한다."""
     try:
-        live_minutes = float(checkpoint_info["minutes"]) - float(board_info["minutes"])
+        board_minutes = float(board_info["minutes"])
+        checkpoint_minutes = float(checkpoint_info["minutes"])
+        if (
+            board_minutes < 0
+            or checkpoint_minutes < 0
+            or not math.isfinite(board_minutes)
+            or not math.isfinite(checkpoint_minutes)
+        ):
+            return None
+        live_minutes = checkpoint_minutes - board_minutes
         arrival_count_delta = (
             int(checkpoint_info["arrprevstationcnt"])
             - int(board_info["arrprevstationcnt"])
@@ -433,10 +444,14 @@ def _refine_legs_realtime(by_route, coords, legs, graph=None):
         board_info = None
     if board_info is not None:
         try:
-            first_result["wait_minutes"] = float(board_info["minutes"])
-            first_result["wait_estimated"] = False
+            wait_minutes = float(board_info["minutes"])
+            if wait_minutes < 0 or not math.isfinite(wait_minutes):
+                board_info = None
+            else:
+                first_result["wait_minutes"] = wait_minutes
+                first_result["wait_estimated"] = False
         except (KeyError, TypeError, ValueError):
-            pass
+            board_info = None
 
     try:
         vehicles = get_route_vehicle_locations(first_leg["route_id"])

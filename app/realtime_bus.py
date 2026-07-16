@@ -7,6 +7,7 @@
 #  계속 바뀌는 데이터라 DB에 쌓아두지 않고 필요할 때 조회하기로 함)
 # =====================================================
 
+import math
 import os
 import threading
 import time
@@ -129,8 +130,11 @@ def get_stop_arrivals(tago_node_id: str) -> dict:
                 continue
             try:
                 route_id = item["routeid"]
+                minutes = float(item["arrtime"]) / 60
+                if minutes < 0 or not math.isfinite(minutes):
+                    continue
                 arrivals[route_id] = {
-                    "minutes": float(item["arrtime"]) / 60,
+                    "minutes": minutes,
                     "arrprevstationcnt": int(item["arrprevstationcnt"]),
                     "vehicle_type": item.get("vehicletp"),
                 }
@@ -175,8 +179,11 @@ def get_route_vehicle_locations(route_id: str) -> list:
             if not isinstance(item, dict):
                 continue
             try:
+                vehicle_no = item["vehicleno"]
+                if not vehicle_no:
+                    continue
                 locations.append({
-                    "vehicle_no": item["vehicleno"],
+                    "vehicle_no": vehicle_no,
                     "node_order": int(item["nodeord"]),
                     "stop_id": item.get("nodeid"),
                     "lat": item.get("gpslati"),

@@ -105,6 +105,42 @@ class RealtimeBusParsingAndCacheTest(unittest.TestCase):
 
         request.assert_called_once()
 
+    def test_stop_arrivals_skip_negative_and_non_finite_arrival_times(self):
+        response = tago_response([
+            {
+                "routeid": route_id,
+                "arrtime": arrtime,
+                "arrprevstationcnt": "3",
+                "vehicletp": "일반버스",
+            }
+            for route_id, arrtime in (
+                ("negative", -60),
+                ("nan", float("nan")),
+                ("infinite", float("inf")),
+            )
+        ])
+
+        with patch.object(realtime_bus, "TAGO_API_KEY", "test-key"), patch.object(
+            realtime_bus, "_request_with_retry", return_value=response
+        ):
+            arrivals = realtime_bus.get_stop_arrivals("DJB8000001")
+
+        self.assertEqual({}, arrivals)
+
+    def test_route_vehicle_locations_skip_missing_or_empty_vehicle_numbers(self):
+        response = tago_response([
+            {"vehicleno": None, "nodeord": "5"},
+            {"vehicleno": "", "nodeord": "6"},
+            {"vehicleno": "BUS-7", "nodeord": "7"},
+        ])
+
+        with patch.object(realtime_bus, "TAGO_API_KEY", "test-key"), patch.object(
+            realtime_bus, "_request_with_retry", return_value=response
+        ):
+            locations = realtime_bus.get_route_vehicle_locations("DJB30300001")
+
+        self.assertEqual(["BUS-7"], [item["vehicle_no"] for item in locations])
+
 
 class RealtimeBusFailureTest(unittest.TestCase):
     def setUp(self):
