@@ -238,6 +238,125 @@ class MultimodalTransitTest(unittest.TestCase):
         recommend.assert_called_once()
         self.assertEqual({"routes": []}, json.loads(output.getvalue()))
 
+    def test_malformed_and_over_600m_transfers_are_skipped_without_failing_request(self):
+        graph = make_graph(
+            [
+                (('subway', 'L1', 'up'), ['subway:A', 'subway:B'], [1.0], SUBWAY_META),
+                (('bus', 'R1', '0'), ['bus:C', 'bus:D'], [1.0], BUS_META),
+            ],
+            {
+                'subway:A': (36.35, 127.380), 'subway:B': (36.35, 127.395),
+                'bus:C': (36.35, 127.395), 'bus:D': (36.35, 127.410),
+            },
+            transfers=[('subway:B', 'bus:C', 100, 2.0)],
+        )
+        graph.transfer_adjacency['subway:B'] = [
+            {"node": "bus:C", "distance_m": "bad", "walking_minutes": 1},
+            {"node": "bus:C", "distance_m": 601, "walking_minutes": 1},
+            {"node": "bus:C", "distance_m": float("nan"), "walking_minutes": 1},
+            {"node": "bus:C", "distance_m": 100, "walking_minutes": -1},
+            {"node": "bus:C", "distance_m": 100, "walking_minutes": float("inf")},
+            {"node": "bus:C", "distance_m": "100", "walking_minutes": "2.5"},
+        ]
+
+        result = self.recommend(graph, destination=(36.35, 127.410))
+
+        self.assertEqual(1, len(result["routes"]))
+        self.assertEqual(2.5, result["routes"][0]["legs"][1]["walk_transfer_minutes"])
+
+    def test_large_fanout_never_evaluates_more_than_layer_expansion_limit(self):
+        class CountingEdges(dict):
+            def __init__(self, values):
+                super().__init__(values)
+                self.get_calls = 0
+
+            def get(self, key, default=None):
+                self.get_calls += 1
+                return super().get(key, default)
+
+        service_count = 30
+        stop_count = 300
+        services = []
+        coords = {}
+        for service_index in range(service_count):
+            nodes = [f"subway:{service_index}-{index}" for index in range(stop_count)]
+            services.append((('subway', f'L{service_index}', 'up'), nodes, [0.1] * (stop_count - 1), SUBWAY_META))
+            for index, node in enumerate(nodes):
+                coords[node] = (36.35, 127.380 + index * 0.00001)
+        coords["subway:DEST"] = (36.35, 127.50)
+        graph = make_graph(services, coords)
+        graph.adjacent_minutes = CountingEdges(graph.adjacent_minutes)
+
+        self.recommend(graph, destination=(36.35, 127.50), max_legs=1)
+
+        self.assertLessEqual(
+            graph.adjacent_minutes.get_calls,
+            multimodal_transit.MAX_EXPANSIONS_PER_LAYER,
+        )
+
+    def test_subway_wait_receives_departure_plus_prior_elapsed(self):
+        graph = make_graph(
+            [
+                (('bus', 'R1', '0'), ['bus:A', 'bus:B'], [2.0], BUS_META),
+                (('subway', 'L1', 'up'), ['subway:C', 'subway:D'], [3.0], SUBWAY_META),
+            ],
+            {
+                'bus:A': (36.35, 127.380), 'bus:B': (36.35, 127.395),
+                'subway:C': (36.35, 127.395), 'subway:D': (36.35, 127.410),
+            },
+            transfers=[('bus:B', 'subway:C', 100, 1.0)],
+        )
+        board_times = []
+
+        def wait(_graph, _station_id, _direction, board_at):
+            board_times.append(board_at)
+            return 5.0, True
+
+        with patch.object(multimodal_transit, "subway_wait_minutes", side_effect=wait), patch.object(
+            transit, "_refine_legs_realtime", return_value=[]
+        ):
+            self.recommend(graph, destination=(36.35, 127.410))
+
+        self.assertIn(datetime(2026, 7, 16, 8, 8), board_times)
+
+    def test_missing_adjacent_edge_stops_downstream_expansion(self):
+        graph = make_graph(
+            [(('subway', 'L1', 'up'), ['subway:A', 'subway:B', 'subway:C'], [1.0, 1.0], SUBWAY_META)],
+            {
+                'subway:A': (36.35, 127.380), 'subway:B': (36.35, 127.395),
+                'subway:C': (36.35, 127.410),
+            },
+        )
+        del graph.adjacent_minutes[(('subway', 'L1', 'up'), 1, 2)]
+
+        result = self.recommend(graph, destination=(36.35, 127.410))
+
+        self.assertEqual([], result["routes"])
+        self.assertEqual("no_route_found", result["reason"])
+
+    def test_invalid_realtime_values_keep_static_first_bus_values(self):
+        graph = make_graph(
+            [(('bus', 'R1', '0'), ['bus:A', 'bus:B'], [4.0], BUS_META)],
+            {'bus:A': (36.35, 127.380), 'bus:B': (36.35, 127.395)},
+        )
+        invalid_values = [
+            {"wait_minutes": float("nan"), "ride_minutes": 1.0},
+            {"wait_minutes": 1.0, "ride_minutes": -1.0},
+            {"wait_minutes": 1.0, "ride_minutes": float("inf")},
+        ]
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid), patch.object(
+                transit,
+                "_refine_legs_realtime",
+                return_value=[{**invalid, "wait_estimated": False, "ride_estimated": False}],
+            ):
+                result = self.recommend(graph, destination=(36.35, 127.395))
+
+            leg = result["routes"][0]["legs"][0]
+            self.assertEqual(5.0, leg["wait_minutes"])
+            self.assertEqual(4.0, leg["ride_minutes"])
+            self.assertEqual(9.0, result["routes"][0]["total_minutes"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import heapq
 from datetime import datetime, timedelta
+from itertools import count
 
 import transit
 from geo import haversine_km
@@ -15,7 +17,9 @@ MAX_NEARBY_KM = 1.0
 NEAREST_PER_MODE = 8
 MAX_BEAM_STATES = 400
 MAX_COMPLETED_PATHS = 200
+MAX_EXPANSIONS_PER_LAYER = 2000
 BUS_WAIT_MINUTES = 5.0
+MAX_TRANSFER_DISTANCE_M = 600.0
 
 
 def _nearby_nodes(graph, lat, lng):
@@ -40,14 +44,26 @@ def _walk_minutes(graph, from_lat, from_lng, node):
 
 def _boarding_points(graph, node):
     yield node, 0.0
-    transfers = sorted(
-        graph.transfer_adjacency.get(node, []),
-        key=lambda item: (float(item["walking_minutes"]), str(item["node"])),
-    )
-    for transfer in transfers:
-        minutes = float(transfer["walking_minutes"])
-        if math.isfinite(minutes) and minutes >= 0:
-            yield str(transfer["node"]), minutes
+    valid_transfers = []
+    for transfer in graph.transfer_adjacency.get(node, []):
+        try:
+            transfer_node = transfer["node"]
+            distance = float(transfer["distance_m"])
+            minutes = float(transfer["walking_minutes"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (
+            not isinstance(transfer_node, str)
+            or not math.isfinite(distance)
+            or not math.isfinite(minutes)
+            or distance < 0
+            or distance > MAX_TRANSFER_DISTANCE_M
+            or minutes < 0
+        ):
+            continue
+        valid_transfers.append((minutes, distance, transfer_node))
+    for minutes, _distance, transfer_node in sorted(valid_transfers):
+        yield transfer_node, minutes
 
 
 def _wait_minutes(graph, service, board_node, board_at):
@@ -55,6 +71,26 @@ def _wait_minutes(graph, service, board_node, board_at):
         return BUS_WAIT_MINUTES, True
     station_id = board_node.split(":", 1)[1]
     return subway_wait_minutes(graph, station_id, service[2], board_at)
+
+
+def _push_bounded(heap, limit, rank, serial, value):
+    """Keep the smallest numeric ranks in a max-heap represented by negatives."""
+    if limit <= 0:
+        return
+    item = (-rank[0], -rank[1], -serial, value)
+    if len(heap) < limit:
+        heapq.heappush(heap, item)
+        return
+    worst_rank = (-heap[0][0], -heap[0][1], -heap[0][2])
+    if (rank[0], rank[1], serial) < worst_rank:
+        heapq.heapreplace(heap, item)
+
+
+def _heap_values_best_first(heap):
+    return [
+        item[3]
+        for item in sorted(heap, key=lambda item: (-item[0], -item[1], -item[2]))
+    ]
 
 
 def _search(graph, origin, destination, max_legs, departure_at):
@@ -76,17 +112,26 @@ def _search(graph, origin, destination, max_legs, departure_at):
         }
         for _distance, node in starts
     ]
-    completed = []
+    completed_heap = []
+    tie_breaker = count()
 
     for _leg_number in range(max_legs):
-        next_states = []
+        next_heap = []
+        expansions = 0
+        limit_reached = False
         for state in frontier:
+            if limit_reached:
+                break
             for board_node, transfer_walk in _boarding_points(graph, state["node"]):
+                if limit_reached:
+                    break
                 memberships = sorted(
                     graph.node_services.get(board_node, []),
                     key=lambda item: (item[0], item[1]),
                 )
                 for service, board_index in memberships:
+                    if limit_reached:
+                        break
                     if service in state["used"]:
                         continue
                     sequence = graph.service_sequences.get(service, [])
@@ -108,7 +153,11 @@ def _search(graph, origin, destination, max_legs, departure_at):
 
                     ride = 0.0
                     for alight_index in range(board_index + 1, len(sequence)):
+                        if expansions >= MAX_EXPANSIONS_PER_LAYER:
+                            limit_reached = True
+                            break
                         edge = graph.adjacent_minutes.get((service, alight_index - 1, alight_index))
+                        expansions += 1
                         if edge is None:
                             break
                         try:
@@ -134,37 +183,39 @@ def _search(graph, origin, destination, max_legs, departure_at):
                         elapsed = board_elapsed + wait + ride
                         legs = state["legs"] + [leg]
                         if alight_node in ends:
-                            completed.append({
+                            candidate = {
                                 "legs": legs,
                                 "access_walk": state["access_walk"],
                                 "egress_walk": ends[alight_node],
                                 "total": elapsed + ends[alight_node],
-                            })
+                            }
+                            _push_bounded(
+                                completed_heap,
+                                MAX_COMPLETED_PATHS,
+                                (candidate["total"], len(candidate["legs"])),
+                                next(tie_breaker),
+                                candidate,
+                            )
                         if len(legs) < max_legs:
-                            next_states.append({
+                            next_state = {
                                 "node": alight_node,
                                 "elapsed": elapsed,
                                 "access_walk": state["access_walk"],
                                 "legs": legs,
                                 "used": state["used"] | {service},
-                            })
+                            }
+                            _push_bounded(
+                                next_heap,
+                                MAX_BEAM_STATES,
+                                (elapsed, len(legs)),
+                                next(tie_breaker),
+                                next_state,
+                            )
 
-        next_states.sort(key=lambda state: (
-            state["elapsed"], len(state["legs"]), state["node"],
-            tuple((leg["service"], leg["board_node"], leg["alight_node"]) for leg in state["legs"]),
-        ))
-        frontier = next_states[:MAX_BEAM_STATES]
-        completed.sort(key=lambda candidate: (
-            candidate["total"], len(candidate["legs"]),
-            tuple(
-                (leg["service"], leg["board_node"], leg["alight_node"])
-                for leg in candidate["legs"]
-            ),
-        ))
-        completed = completed[:MAX_COMPLETED_PATHS]
+        frontier = _heap_values_best_first(next_heap)
         if not frontier:
             break
-    return completed
+    return _heap_values_best_first(completed_heap)
 
 
 def _legacy_bus_leg(graph, leg):
