@@ -294,6 +294,38 @@ class MultimodalTransitTest(unittest.TestCase):
             multimodal_transit.MAX_EXPANSIONS_PER_LAYER,
         )
 
+    def test_bus_fanout_cannot_starve_later_subway_first_route(self):
+        class CountingEdges(dict):
+            def __init__(self, values):
+                super().__init__(values)
+                self.get_calls = 0
+
+            def get(self, key, default=None):
+                self.get_calls += 1
+                return super().get(key, default)
+
+        bus_nodes = [f"bus:B{index}" for index in range(2501)]
+        graph = make_graph(
+            [
+                (('bus', 'WIDE', '0'), bus_nodes, [0.01] * 2500, BUS_META),
+                (('subway', 'L1', 'up'), ['subway:A', 'subway:Z'], [2.0], SUBWAY_META),
+            ],
+            {
+                **{node: (36.35, 127.380 + index * 0.000001) for index, node in enumerate(bus_nodes)},
+                'subway:A': (36.35, 127.380),
+                'subway:Z': (36.35, 127.410),
+            },
+        )
+        graph.adjacent_minutes = CountingEdges(graph.adjacent_minutes)
+
+        result = self.recommend(graph, destination=(36.35, 127.410), max_legs=1)
+
+        self.assertEqual("subway", result["routes"][0]["legs"][0]["mode"])
+        self.assertLessEqual(
+            graph.adjacent_minutes.get_calls,
+            multimodal_transit.MAX_EXPANSIONS_PER_LAYER,
+        )
+
     def test_subway_wait_receives_departure_plus_prior_elapsed(self):
         graph = make_graph(
             [

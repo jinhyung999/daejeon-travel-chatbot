@@ -18,6 +18,7 @@ NEAREST_PER_MODE = 8
 MAX_BEAM_STATES = 400
 MAX_COMPLETED_PATHS = 200
 MAX_EXPANSIONS_PER_LAYER = 2000
+MIN_EXPANSIONS_PER_MODE = 100
 BUS_WAIT_MINUTES = 5.0
 MAX_TRANSFER_DISTANCE_M = 600.0
 
@@ -93,6 +94,21 @@ def _heap_values_best_first(heap):
     ]
 
 
+def _available_service_modes(graph, frontier):
+    modes = set()
+    for state in frontier:
+        for board_node, _transfer_walk in _boarding_points(graph, state["node"]):
+            for service, board_index in graph.node_services.get(board_node, []):
+                sequence = graph.service_sequences.get(service, [])
+                if (
+                    service not in state["used"]
+                    and board_index < len(sequence) - 1
+                    and (service, board_index, board_index + 1) in graph.adjacent_minutes
+                ):
+                    modes.add(service[0])
+    return modes
+
+
 def _search(graph, origin, destination, max_legs, departure_at):
     starts = _nearby_nodes(graph, origin["lat"], origin["lng"])
     ends = {
@@ -118,6 +134,13 @@ def _search(graph, origin, destination, max_legs, departure_at):
     for _leg_number in range(max_legs):
         next_heap = []
         expansions = 0
+        mode_expansions = {"bus": 0, "subway": 0}
+        available_modes = _available_service_modes(graph, frontier)
+        mode_limit = (
+            MAX_EXPANSIONS_PER_LAYER - MIN_EXPANSIONS_PER_MODE
+            if {"bus", "subway"} <= available_modes
+            else MAX_EXPANSIONS_PER_LAYER
+        )
         limit_reached = False
         for state in frontier:
             if limit_reached:
@@ -156,8 +179,11 @@ def _search(graph, origin, destination, max_legs, departure_at):
                         if expansions >= MAX_EXPANSIONS_PER_LAYER:
                             limit_reached = True
                             break
+                        if mode_expansions.get(service[0], 0) >= mode_limit:
+                            break
                         edge = graph.adjacent_minutes.get((service, alight_index - 1, alight_index))
                         expansions += 1
+                        mode_expansions[service[0]] = mode_expansions.get(service[0], 0) + 1
                         if edge is None:
                             break
                         try:
