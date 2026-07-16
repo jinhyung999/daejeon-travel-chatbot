@@ -113,6 +113,57 @@ class SubwayDataBuilderTest(unittest.TestCase):
             edges,
         )
 
+    def _write_edge_times(self, header, values):
+        rows = []
+        for sequence, value in enumerate(values, start=1):
+            from_no = 100 + sequence
+            to_no = from_no + 1
+            if sequence == 20:
+                to_no = 120
+            rows.append(
+                {
+                    "sequence": sequence,
+                    "from_station_no": from_no,
+                    "to_station_no": to_no,
+                    header: value,
+                    "distance_km": 1.0 + sequence / 100,
+                }
+            )
+        self._write_cp949(
+            self.edge_csv,
+            ["sequence", "from_station_no", "to_station_no", header, "distance_km"],
+            rows,
+        )
+
+    def test_ambiguous_korean_travel_time_header_parses_compact_mmss(self):
+        compact_times = [
+            200, 220, 150, 150, 150, 210, 150, 210, 210, 140, 200,
+            140, 140, 200, 200, 200, 140, 200, 140, 200, 130,
+        ]
+        self._write_edge_times("소요시간", compact_times)
+
+        snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+
+        parsed = [edge["travel_seconds"] for edge in snapshot["edges"]]
+        self.assertEqual([120, 140, 110], parsed[:3])
+        self.assertEqual(90, parsed[-1])
+        self.assertEqual(2400, sum(parsed))
+        self.assertEqual(40, sum(parsed) / 60)
+
+    def test_ambiguous_korean_travel_time_rejects_invalid_compact_mmss(self):
+        for invalid in (160, -130, "not-a-number", "1.5"):
+            with self.subTest(invalid=invalid):
+                self._write_edge_times("소요시간", [invalid] + [130] * 20)
+                with self.assertRaisesRegex(ValueError, "invalid edge row|MMSS"):
+                    build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+
+    def test_explicit_seconds_headers_remain_literal_seconds(self):
+        for header in ("travel_seconds", "소요시간초"):
+            with self.subTest(header=header):
+                self._write_edge_times(header, [200] * 21)
+                snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+                self.assertEqual([200] * 21, [edge["travel_seconds"] for edge in snapshot["edges"]])
+
     def test_build_snapshot_parses_normalizes_and_corrects_known_edge(self):
         snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
 

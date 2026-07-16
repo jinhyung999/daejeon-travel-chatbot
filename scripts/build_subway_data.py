@@ -98,6 +98,26 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         raise ValueError(f"cannot read CP949 CSV {path}: {exc}") from exc
 
 
+def _edge_travel_seconds(row: dict[str, str]) -> int:
+    normalized = {_normalized_header(key): value for key, value in row.items() if key is not None}
+    for alias in ("travel_seconds", "소요시간초"):
+        value = normalized.get(_normalized_header(alias))
+        if value not in (None, ""):
+            return int(float(value.strip()))
+
+    compact_value = normalized.get(_normalized_header("소요시간"))
+    if compact_value not in (None, ""):
+        compact = compact_value.strip()
+        if not compact.isascii() or not compact.isdigit() or len(compact) > 4:
+            raise ValueError("edge compact MMSS must contain one to four digits")
+        minutes, seconds = divmod(int(compact), 100)
+        if seconds >= 60 or minutes * 60 + seconds <= 0:
+            raise ValueError("edge compact MMSS must be a positive valid time")
+        return minutes * 60 + seconds
+
+    return int(float(_field(row, ("travel_seconds",), 3).strip()))
+
+
 def _normalize_korean_name(value: str) -> str:
     value = value.strip()
     opening = value.find("(")
@@ -254,7 +274,7 @@ def build_snapshot(station_csv: Path, edge_csv: Path, db_path: Path) -> dict:
             sequence = int(_field(row, ("sequence", "순번", "연번", "구간순번"), 0).strip())
             from_no = int(_field(row, ("from_station_no", "출발역번호", "시작역번호", "from"), 1).strip())
             to_no = int(_field(row, ("to_station_no", "도착역번호", "종료역번호", "to"), 2).strip())
-            travel_seconds = int(float(_field(row, ("travel_seconds", "소요시간초", "소요시간"), 3).strip()))
+            travel_seconds = _edge_travel_seconds(row)
             distance_km = float(_field(row, ("distance_km", "거리km", "거리"), 4).strip())
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid edge row: {row}") from exc
