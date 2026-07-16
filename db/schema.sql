@@ -157,8 +157,12 @@ CREATE TABLE IF NOT EXISTS subway_schedule (
   day_type TEXT NOT NULL CHECK (day_type IN ('01', '02', '03')),
   direction TEXT NOT NULL CHECK (direction IN ('up', 'down')),
   train_no TEXT NOT NULL,
-  arrival_time TEXT,
-  departure_time TEXT NOT NULL,
+  arrival_time TEXT CHECK (
+    arrival_time IS NULL OR (length(arrival_time) = 6 AND arrival_time NOT GLOB '*[^0-9]*')
+  ),
+  departure_time TEXT NOT NULL CHECK (
+    length(departure_time) = 6 AND departure_time NOT GLOB '*[^0-9]*'
+  ),
   PRIMARY KEY (station_id, day_type, direction, train_no, departure_time)
 );
 

@@ -370,7 +370,7 @@ def recommend_transit_routes(
         candidate["access_walk"] + candidate["egress_walk"],
     ))
 
-    shortlist = candidates[:max(15, max_results * 5)]
+    shortlist = candidates[:max_results]
     for candidate in shortlist:
         _refine_first_bus(graph, candidate)
     for candidate in shortlist:

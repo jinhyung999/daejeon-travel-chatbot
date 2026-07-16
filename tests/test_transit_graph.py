@@ -167,6 +167,19 @@ class TransitGraphTest(unittest.TestCase):
             graph, "DJM103", "down", datetime(2026, 7, 19, 8, 0)
         ))
 
+    def test_wait_skips_malformed_persisted_schedule_and_falls_back(self):
+        graph = transit_graph.get_transit_graph(self.db_path)
+        graph.schedules[("DJM103", "01", "up")] = [
+            None,
+            "8:30",
+            "08AA00",
+            "246000",
+        ]
+
+        self.assertEqual((5.0, True), transit_graph.subway_wait_minutes(
+            graph, "DJM103", "up", datetime(2026, 7, 16, 8, 0)
+        ))
+
     def test_cache_identity_and_maxsize(self):
         self.assertIs(
             transit_graph.get_transit_graph(self.db_path),

@@ -53,8 +53,12 @@ CREATE TABLE IF NOT EXISTS subway_schedule (
   day_type TEXT NOT NULL CHECK (day_type IN ('01', '02', '03')),
   direction TEXT NOT NULL CHECK (direction IN ('up', 'down')),
   train_no TEXT NOT NULL,
-  arrival_time TEXT,
-  departure_time TEXT NOT NULL,
+  arrival_time TEXT CHECK (
+    arrival_time IS NULL OR (length(arrival_time) = 6 AND arrival_time NOT GLOB '*[^0-9]*')
+  ),
+  departure_time TEXT NOT NULL CHECK (
+    length(departure_time) = 6 AND departure_time NOT GLOB '*[^0-9]*'
+  ),
   PRIMARY KEY (station_id, day_type, direction, train_no, departure_time)
 );
 CREATE INDEX IF NOT EXISTS idx_subway_schedule_lookup
@@ -165,8 +169,36 @@ def _validate_snapshot(snapshot: dict) -> None:
     }
     if actual_edges != expected_edges or len(actual_edges) != 21:
         raise ValueError("edges must be the 21 unique adjacent station pairs")
+    expected_station_ids = {f"DJM{station_no}" for station_no in EXPECTED_STATION_NUMBERS}
+    transfer_station_ids = {row["station_id"] for row in transfers}
+    unknown_station_ids = transfer_station_ids - expected_station_ids
+    if unknown_station_ids:
+        raise ValueError(
+            "transfers reference unknown station IDs: " + ", ".join(sorted(unknown_station_ids))
+        )
+    missing_station_ids = expected_station_ids - transfer_station_ids
+    if missing_station_ids:
+        raise ValueError(
+            "transfer coverage must include all stations; missing: "
+            + ", ".join(sorted(missing_station_ids))
+        )
     if any(not (0 <= float(row["distance_m"]) <= TRANSFER_RADIUS_M) for row in transfers):
         raise ValueError("transfer distance exceeds 600 metres")
+    for row in snapshot.get("schedules", []):
+        for field in ("departure_time", "arrival_time"):
+            value = row.get(field)
+            if field == "arrival_time" and value is None:
+                continue
+            if (
+                not isinstance(value, str)
+                or len(value) != 6
+                or not value.isascii()
+                or not value.isdigit()
+                or int(value[:2]) > 23
+                or int(value[2:4]) > 59
+                or int(value[4:6]) > 59
+            ):
+                raise ValueError(f"schedule {field} must be a valid HHMMSS time")
 
 
 def build_snapshot(station_csv: Path, edge_csv: Path, db_path: Path) -> dict:
@@ -299,13 +331,14 @@ def apply_snapshot(snapshot: dict, db_path: Path) -> Path:
         finally:
             backup_connection.close()
             source_connection.close()
-        # executescript() implicitly commits; execute statements individually so
-        # table creation and replacement remain inside this immediate transaction.
+        # Recreate all related tables so schema changes migrate existing databases.
+        # executescript() implicitly commits, so execute statements individually to
+        # keep the migration and replacement inside this immediate transaction.
+        for table in ("transit_transfer", "subway_schedule", "subway_edge", "subway_station", "subway_line"):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
         for statement in SUBWAY_SCHEMA_SQL.split(";"):
             if statement.strip():
                 connection.execute(statement)
-        for table in ("transit_transfer", "subway_schedule", "subway_edge", "subway_station", "subway_line"):
-            connection.execute(f"DELETE FROM {table}")
         connection.executemany(
             "INSERT INTO subway_line (line_id, name_ko, name_en) VALUES (:line_id, :name_ko, :name_en)",
             snapshot["lines"],
@@ -341,6 +374,16 @@ def apply_snapshot(snapshot: dict, db_path: Path) -> Path:
             raise ValueError("applied station count is not 22")
         if connection.execute("SELECT count(*) FROM subway_edge").fetchone()[0] != 21:
             raise ValueError("applied edge count is not 21")
+        uncovered = connection.execute(
+            "SELECT s.station_id FROM subway_station AS s "
+            "LEFT JOIN transit_transfer AS t ON t.station_id = s.station_id "
+            "GROUP BY s.station_id HAVING count(t.station_id) = 0 ORDER BY s.station_id"
+        ).fetchall()
+        if uncovered:
+            raise ValueError(
+                "subway stations without transfer coverage: "
+                + ", ".join(row[0] for row in uncovered)
+            )
         connection.commit()
     except Exception:
         connection.rollback()

@@ -5,6 +5,7 @@ import sqlite3
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import build_subway_data as builder
 from scripts.build_subway_data import apply_snapshot, build_snapshot
@@ -192,24 +193,84 @@ class SubwayDataBuilderTest(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_snapshot_without_transfer_for_one_station_can_be_applied(self):
+    def test_snapshot_missing_transfer_coverage_is_rejected_before_mutation(self):
         snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+        apply_snapshot(snapshot, self.db_path)
         snapshot["transfers"] = [
             row for row in snapshot["transfers"] if row["station_id"] != "DJM122"
         ]
 
-        apply_snapshot(snapshot, self.db_path)
+        with self.assertRaisesRegex(ValueError, "transfer.*cover|coverage"):
+            apply_snapshot(snapshot, self.db_path)
 
         connection = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(
-                0,
+            self.assertGreater(
                 connection.execute(
                     "SELECT count(*) FROM transit_transfer WHERE station_id = 'DJM122'"
                 ).fetchone()[0],
+                0,
             )
         finally:
             connection.close()
+
+    def test_snapshot_transfer_for_unknown_station_is_rejected(self):
+        snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+        snapshot["transfers"].append(
+            {
+                **snapshot["transfers"][0],
+                "station_id": "DJM999",
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown.*station|station.*unknown"):
+            apply_snapshot(snapshot, self.db_path)
+
+    def test_apply_rolls_back_if_database_has_station_without_transfer(self):
+        snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+        apply_snapshot(snapshot, self.db_path)
+        invalid = copy.deepcopy(snapshot)
+        invalid["transfers"] = [
+            row for row in invalid["transfers"] if row["station_id"] != "DJM122"
+        ]
+
+        with patch.object(builder, "_validate_snapshot", return_value=None):
+            with self.assertRaisesRegex(ValueError, "without.*transfer|transfer.*coverage"):
+                apply_snapshot(invalid, self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertGreater(
+                connection.execute(
+                    "SELECT count(*) FROM transit_transfer WHERE station_id = 'DJM122'"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            connection.close()
+
+    def test_rejects_malformed_schedule_times(self):
+        snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+        base = {
+            "station_id": "DJM101",
+            "day_type": "01",
+            "direction": "up",
+            "train_no": "T1",
+            "arrival_time": None,
+            "departure_time": "080100",
+        }
+        cases = [
+            ("departure_time", "8:01"),
+            ("departure_time", "246000"),
+            ("departure_time", "08AA00"),
+            ("arrival_time", "236060"),
+        ]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                invalid = copy.deepcopy(snapshot)
+                invalid["schedules"] = [{**base, field: value}]
+                with self.assertRaisesRegex(ValueError, "schedule.*time|HHMMSS"):
+                    apply_snapshot(invalid, self.db_path)
 
     def test_missing_database_dry_run_does_not_create_a_file(self):
         missing_db = self.root / f"{self.prefix}_missing.db"
@@ -281,6 +342,62 @@ class SubwayDataBuilderTest(unittest.TestCase):
         file_objects = create_objects(file_db, schema_path.read_text(encoding="utf-8"), False)
 
         self.assertEqual(file_objects, runtime_objects)
+
+    def test_apply_migrates_legacy_subway_tables_to_current_runtime_schema(self):
+        snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)
+        legacy_sql = builder.SUBWAY_SCHEMA_SQL.replace(
+            "arrival_time TEXT CHECK (\n"
+            "    arrival_time IS NULL OR (length(arrival_time) = 6 AND arrival_time NOT GLOB '*[^0-9]*')\n"
+            "  ),\n"
+            "  departure_time TEXT NOT NULL CHECK (\n"
+            "    length(departure_time) = 6 AND departure_time NOT GLOB '*[^0-9]*'\n"
+            "  ),",
+            "arrival_time TEXT,\n  departure_time TEXT NOT NULL,",
+        )
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.executescript(legacy_sql)
+            legacy_schedule_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'subway_schedule'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertNotIn("length(departure_time)", legacy_schedule_sql)
+
+        apply_snapshot(snapshot, self.db_path)
+
+        expected_db = self.root / f"{self.prefix}_expected-schema.db"
+        expected_connection = sqlite3.connect(expected_db)
+        try:
+            expected_connection.execute("CREATE TABLE transport (stop_id TEXT PRIMARY KEY)")
+            expected_connection.executescript(builder.SUBWAY_SCHEMA_SQL)
+            expected = expected_connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('subway_line', 'subway_station', 'subway_edge', "
+                "'subway_schedule', 'transit_transfer') ORDER BY name"
+            ).fetchall()
+        finally:
+            expected_connection.close()
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            actual = connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('subway_line', 'subway_station', 'subway_edge', "
+                "'subway_schedule', 'transit_transfer') ORDER BY name"
+            ).fetchall()
+            schedule_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'subway_schedule'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+        normalize = lambda sql: "".join(sql.lower().split())
+        self.assertEqual(
+            [(name, normalize(sql)) for name, sql in expected],
+            [(name, normalize(sql)) for name, sql in actual],
+        )
+        self.assertIn("length(departure_time) = 6", schedule_sql)
 
     def test_database_failure_rolls_back_all_replacement_rows(self):
         snapshot = build_snapshot(self.station_csv, self.edge_csv, self.db_path)

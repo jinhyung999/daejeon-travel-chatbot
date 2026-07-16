@@ -183,8 +183,19 @@ def subway_wait_minutes(
     day_type = "01" if board_at.weekday() < 5 else "02" if board_at.weekday() == 5 else "03"
     board_seconds = board_at.hour * 3600 + board_at.minute * 60 + board_at.second
     for departure in graph.schedules.get((station_id, day_type, direction), []):
-        normalized = departure.replace(":", "")
-        departure_seconds = int(normalized[:2]) * 3600 + int(normalized[2:4]) * 60 + int(normalized[4:6])
+        if (
+            not isinstance(departure, str)
+            or len(departure) != 6
+            or not departure.isascii()
+            or not departure.isdigit()
+        ):
+            continue
+        hour = int(departure[:2])
+        minute = int(departure[2:4])
+        second = int(departure[4:6])
+        if hour > 23 or minute > 59 or second > 59:
+            continue
+        departure_seconds = hour * 3600 + minute * 60 + second
         if departure_seconds >= board_seconds:
             return ((departure_seconds - board_seconds) / 60.0, False)
     return (5.0, True)

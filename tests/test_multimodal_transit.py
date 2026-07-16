@@ -127,6 +127,57 @@ class MultimodalTransitTest(unittest.TestCase):
         self.assertEqual("subway", result["routes"][0]["legs"][0]["mode"])
         self.assertEqual("bus", result["routes"][1]["legs"][0]["mode"])
 
+    def test_zero_max_results_skips_realtime_refinement(self):
+        graph = make_graph(
+            [(('bus', 'R1', '0'), ['bus:A', 'bus:B'], [4.0], BUS_META)],
+            {'bus:A': (36.35, 127.380), 'bus:B': (36.35, 127.390)},
+        )
+
+        with patch.object(transit, "_refine_legs_realtime") as refine:
+            result = self.recommend(graph, max_results=0)
+
+        self.assertEqual([], result["routes"])
+        refine.assert_not_called()
+
+    def test_refines_no_more_candidates_than_max_results(self):
+        graph = make_graph(
+            [(('bus', 'R1', '0'), ['bus:A', 'bus:B'], [4.0], BUS_META)],
+            {'bus:A': (36.35, 127.380), 'bus:B': (36.35, 127.390)},
+        )
+        candidates = []
+        for index in range(20):
+            candidates.append({
+                "total": 9.0 + index,
+                "access_walk": 0.0,
+                "egress_walk": 0.0,
+                "legs": [{
+                    "service": ('bus', 'R1', '0'),
+                    "board_index": 0,
+                    "alight_index": 1,
+                    "board_node": f"bus:A{index}",
+                    "alight_node": f"bus:B{index}",
+                    "wait_minutes": 5.0,
+                    "wait_estimated": True,
+                    "ride_minutes": 4.0 + index,
+                    "ride_estimated": True,
+                    "walk_transfer_minutes": 0.0,
+                }],
+            })
+        refined = [{
+            "wait_minutes": 5.0,
+            "wait_estimated": True,
+            "ride_minutes": 4.0,
+            "ride_estimated": True,
+        }]
+
+        with patch.object(multimodal_transit, "_search", return_value=candidates), patch.object(
+            transit, "_refine_legs_realtime", return_value=refined
+        ) as refine:
+            result = self.recommend(graph, max_results=3)
+
+        self.assertEqual(3, len(result["routes"]))
+        self.assertLessEqual(refine.call_count, 3)
+
     def test_three_legs_use_two_stored_transfers_and_never_expand_a_fourth(self):
         graph = make_graph(
             [
