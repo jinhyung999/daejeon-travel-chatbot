@@ -48,11 +48,22 @@ class RealtimeCandidateLimitTest(unittest.TestCase):
             return []
 
         with patch.object(transit, "get_route_vehicle_locations", side_effect=fake_vehicle_locations), \
-             patch.object(transit, "get_arrival_info", return_value=None):
+             patch.object(
+                 transit,
+                 "get_arrival_info",
+                 return_value={"minutes": 3, "arrprevstationcnt": 2},
+             ):
             result = transit.recommend_bus_routes("성심당", "대전시립박물관")
 
         self.assertEqual(3, len(result.get("routes", [])))
-        self.assertLessEqual(len(calls), 3)
+        self.assertEqual(3, len(calls))
+        self.assertEqual(
+            {"vehicle_locations_unavailable"},
+            {
+                route["legs"][0]["realtime_failure_reason"]
+                for route in result["routes"]
+            },
+        )
 
 
 class FirstLegRealtimeIntegrationTest(unittest.TestCase):
@@ -126,6 +137,7 @@ class FirstLegRealtimeIntegrationTest(unittest.TestCase):
         self.assertGreater(first["static_remainder_minutes"], 0)
         self.assertEqual("medium", first["confidence"])
         self.assertTrue(first["ride_estimated"])
+        self.assertIsNone(first["realtime_failure_reason"])
 
         self.assertEqual("static_stop_distance", second["ride_time_source"])
         self.assertIsNone(second["vehicle_no"])
@@ -134,6 +146,7 @@ class FirstLegRealtimeIntegrationTest(unittest.TestCase):
         self.assertEqual(0.0, second["live_segment_minutes"])
         self.assertGreater(second["ride_minutes"], 0)
         self.assertEqual("low", second["confidence"])
+        self.assertEqual("first_bus_leg_only", second["realtime_failure_reason"])
         locations.assert_called_once_with("R1")
         self.assertEqual([("S2", "R1"), ("S3", "R1")], [call.args for call in arrivals.call_args_list])
 
@@ -153,6 +166,104 @@ class FirstLegRealtimeIntegrationTest(unittest.TestCase):
             self.assertEqual(leg["ride_minutes"], leg["static_remainder_minutes"])
             self.assertGreater(leg["ride_minutes"], 0)
             self.assertEqual("low", leg["confidence"])
+        self.assertEqual("board_arrival_unavailable", refined[0]["realtime_failure_reason"])
+        self.assertEqual("first_bus_leg_only", refined[1]["realtime_failure_reason"])
+
+    def test_vehicle_location_failure_reason_is_preserved(self):
+        with patch.object(
+            transit,
+            "get_arrival_info",
+            return_value={"minutes": 3, "arrprevstationcnt": 2},
+        ), patch.object(transit, "get_route_vehicle_locations", return_value=[]):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "vehicle_locations_unavailable",
+            refined[0]["realtime_failure_reason"],
+        )
+
+    def test_checkpoint_failure_reason_is_preserved(self):
+        vehicles = [
+            {"vehicle_no": "TARGET", "node_order": 1},
+            {"vehicle_no": "AT-BOARD", "node_order": 2},
+        ]
+        with patch.object(
+            transit,
+            "get_arrival_info",
+            return_value={"minutes": 3, "arrprevstationcnt": 2},
+        ), patch.object(transit, "get_route_vehicle_locations", return_value=vehicles):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "live_checkpoint_unavailable",
+            refined[0]["realtime_failure_reason"],
+        )
+
+    def test_boarding_vehicle_unmatched_reason_is_preserved(self):
+        vehicles = [{"vehicle_no": "AFTER-BOARD", "node_order": 3}]
+        with patch.object(
+            transit,
+            "get_arrival_info",
+            return_value={"minutes": 3, "arrprevstationcnt": 2},
+        ), patch.object(transit, "get_route_vehicle_locations", return_value=vehicles):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "boarding_vehicle_unmatched",
+            refined[0]["realtime_failure_reason"],
+        )
+
+    def test_checkpoint_arrival_unavailable_reason_is_preserved(self):
+        vehicles = [
+            {"vehicle_no": "TARGET", "node_order": 1},
+            {"vehicle_no": "LEADER", "node_order": 4},
+        ]
+
+        def arrival(stop_id, _route_id):
+            if stop_id == "S2":
+                return {"minutes": 3, "arrprevstationcnt": 2}
+            return None
+
+        with patch.object(transit, "get_arrival_info", side_effect=arrival), patch.object(
+            transit, "get_route_vehicle_locations", return_value=vehicles
+        ):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "checkpoint_arrival_unavailable",
+            refined[0]["realtime_failure_reason"],
+        )
+
+    def test_checkpoint_validation_failure_reason_is_preserved(self):
+        vehicles = [
+            {"vehicle_no": "TARGET", "node_order": 1},
+            {"vehicle_no": "LEADER", "node_order": 4},
+        ]
+
+        def arrival(stop_id, _route_id):
+            if stop_id == "S2":
+                return {"minutes": 3, "arrprevstationcnt": 2}
+            return {"minutes": 60, "arrprevstationcnt": 3}
+
+        with patch.object(transit, "get_arrival_info", side_effect=arrival), patch.object(
+            transit, "get_route_vehicle_locations", return_value=vehicles
+        ):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "checkpoint_validation_failed",
+            refined[0]["realtime_failure_reason"],
+        )
 
     def test_invalid_board_eta_keeps_static_wait(self):
         for invalid_eta in (-1, float("nan"), float("inf")):

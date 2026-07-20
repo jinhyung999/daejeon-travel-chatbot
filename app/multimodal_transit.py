@@ -287,6 +287,18 @@ def _refine_first_bus(graph, candidate):
     legs[0]["ride_minutes"] = ride
     legs[0]["wait_estimated"] = bool(values.get("wait_estimated", legs[0]["wait_estimated"]))
     legs[0]["ride_estimated"] = bool(values.get("ride_estimated", legs[0]["ride_estimated"]))
+    for key in (
+        "ride_time_source",
+        "vehicle_no",
+        "live_checkpoint_stop_id",
+        "live_checkpoint_stop",
+        "live_segment_minutes",
+        "static_remainder_minutes",
+        "confidence",
+        "realtime_failure_reason",
+    ):
+        if key in values:
+            legs[0][key] = values[key]
 
 
 def _dedupe(candidates):
@@ -332,6 +344,18 @@ def _leg_output(graph, leg):
             "route_id": service_id,
             "route_no": meta.get("route_no") or service_id,
             "route_type": meta.get("route_type"),
+            "ride_time_source": leg.get("ride_time_source", "static_stop_distance"),
+            "vehicle_no": leg.get("vehicle_no"),
+            "live_checkpoint_stop_id": leg.get("live_checkpoint_stop_id"),
+            "live_checkpoint_stop": leg.get("live_checkpoint_stop"),
+            "live_segment_minutes": round(float(leg.get("live_segment_minutes", 0.0)), 1),
+            "static_remainder_minutes": round(
+                float(leg.get("static_remainder_minutes", leg["ride_minutes"])), 1
+            ),
+            "confidence": leg.get("confidence", "low"),
+            "realtime_failure_reason": leg.get(
+                "realtime_failure_reason", "realtime_refinement_unavailable"
+            ),
         })
     else:
         output.update({

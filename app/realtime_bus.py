@@ -29,7 +29,7 @@ _cache_guard = threading.Lock()
 _cache_key_locks = {}
 
 
-def _request_with_retry(url, params, max_retry=1, timeout=2):
+def _request_with_retry(url, params, max_retry=2, timeout=5):
     """실시간 조회는 대화형 상황에서 호출되므로, collectors/common.py의
     request_with_retry(최대 3회, 지수백오프)보다 짧은 타임아웃/재시도로 빠르게 실패한다."""
     for attempt in range(max_retry):

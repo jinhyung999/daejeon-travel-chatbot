@@ -416,7 +416,7 @@ def _calculate_live_ride(
 def _refine_legs_realtime(by_route, coords, legs, graph=None):
     """모든 구간을 정적 결과로 초기화한 뒤 첫 구간만 실시간 차량 ETA로 보정한다."""
     refined = []
-    for leg in legs:
+    for index, leg in enumerate(legs):
         static_ride = _static_leg_minutes(by_route, coords, leg, graph=graph)
         refined.append({
             **leg,
@@ -431,6 +431,9 @@ def _refine_legs_realtime(by_route, coords, legs, graph=None):
             "live_segment_minutes": 0.0,
             "static_remainder_minutes": static_ride,
             "confidence": "low",
+            "realtime_failure_reason": (
+                "board_arrival_unavailable" if index == 0 else "first_bus_leg_only"
+            ),
         })
 
     if not refined:
@@ -453,26 +456,53 @@ def _refine_legs_realtime(by_route, coords, legs, graph=None):
         except (KeyError, TypeError, ValueError):
             board_info = None
 
+    if board_info is None:
+        return refined
+
     try:
         vehicles = get_route_vehicle_locations(first_leg["route_id"])
         direction_stops = by_route[(first_leg["route_id"], first_leg["updowncd"])]
-        target = _select_boarding_vehicle(
-            vehicles, direction_stops, first_leg["board_order"]
-        )
-        checkpoint_order = _select_live_checkpoint(
-            target,
-            vehicles,
-            direction_stops,
-            first_leg["board_order"],
-            first_leg["alight_order"],
-        )
-        if board_info is None or checkpoint_order is None:
-            return refined
+    except Exception:
+        first_result["realtime_failure_reason"] = "vehicle_locations_unavailable"
+        return refined
+    if not vehicles:
+        first_result["realtime_failure_reason"] = "vehicle_locations_unavailable"
+        return refined
 
-        checkpoint_stop_id = next(
-            stop_id for order, stop_id in direction_stops if order == checkpoint_order
-        )
+    target = _select_boarding_vehicle(
+        vehicles, direction_stops, first_leg["board_order"]
+    )
+    if target is None:
+        first_result["realtime_failure_reason"] = "boarding_vehicle_unmatched"
+        return refined
+
+    checkpoint_order = _select_live_checkpoint(
+        target,
+        vehicles,
+        direction_stops,
+        first_leg["board_order"],
+        first_leg["alight_order"],
+    )
+    if checkpoint_order is None:
+        first_result["realtime_failure_reason"] = "live_checkpoint_unavailable"
+        return refined
+
+    checkpoint_stop_id = next(
+        (stop_id for order, stop_id in direction_stops if order == checkpoint_order),
+        None,
+    )
+    if checkpoint_stop_id is None:
+        first_result["realtime_failure_reason"] = "live_checkpoint_unavailable"
+        return refined
+    try:
         checkpoint_info = get_arrival_info(checkpoint_stop_id, first_leg["route_id"])
+    except Exception:
+        checkpoint_info = None
+    if checkpoint_info is None:
+        first_result["realtime_failure_reason"] = "checkpoint_arrival_unavailable"
+        return refined
+
+    try:
         static_live = _static_leg_minutes(
             by_route,
             coords,
@@ -494,6 +524,7 @@ def _refine_legs_realtime(by_route, coords, legs, graph=None):
             static_remainder,
         )
         if live_ride is None:
+            first_result["realtime_failure_reason"] = "checkpoint_validation_failed"
             return refined
 
         stop_names = graph.stop_names if graph is not None else {}
@@ -508,8 +539,10 @@ def _refine_legs_realtime(by_route, coords, legs, graph=None):
             "live_checkpoint_stop_id": checkpoint_stop_id,
             "live_checkpoint_stop": stop_names.get(checkpoint_stop_id, checkpoint_stop_id),
             "confidence": "medium",
+            "realtime_failure_reason": None,
         })
     except Exception:
+        first_result["realtime_failure_reason"] = "checkpoint_validation_failed"
         return refined
     return refined
 
@@ -646,6 +679,7 @@ def recommend_bus_routes(from_place: str, to_place: str, max_transfers: int = MA
                 "live_segment_minutes": round(leg["live_segment_minutes"], 1),
                 "static_remainder_minutes": round(leg["static_remainder_minutes"], 1),
                 "confidence": leg["confidence"],
+                "realtime_failure_reason": leg["realtime_failure_reason"],
             })
 
         routes_out.append({

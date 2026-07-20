@@ -265,7 +265,15 @@ class MultimodalTransitTest(unittest.TestCase):
             self.assertEqual(1, len(legs))
             self.assertEqual("R1", legs[0]["route_id"])
             return [{**legs[0], "wait_minutes": 1.5, "wait_estimated": False,
-                     "ride_minutes": 2.5, "ride_estimated": True}]
+                     "ride_minutes": 2.5, "ride_estimated": True,
+                     "ride_time_source": "live_checkpoint_plus_static",
+                     "vehicle_no": "BUS-123",
+                     "live_checkpoint_stop_id": "B-CHECK",
+                     "live_checkpoint_stop": "체크포인트 정류소",
+                     "live_segment_minutes": 1.5,
+                     "static_remainder_minutes": 1.0,
+                     "confidence": "medium",
+                     "realtime_failure_reason": None}]
 
         with patch.object(transit, "_refine_legs_realtime", side_effect=refined) as refine:
             result = self.recommend(graph, destination=(36.35, 127.410))
@@ -274,6 +282,14 @@ class MultimodalTransitTest(unittest.TestCase):
         self.assertEqual(1, refine.call_count)
         self.assertEqual(1.5, route["legs"][0]["wait_minutes"])
         self.assertEqual(2.5, route["legs"][0]["ride_minutes"])
+        self.assertEqual("live_checkpoint_plus_static", route["legs"][0]["ride_time_source"])
+        self.assertEqual("BUS-123", route["legs"][0]["vehicle_no"])
+        self.assertEqual("B-CHECK", route["legs"][0]["live_checkpoint_stop_id"])
+        self.assertEqual("체크포인트 정류소", route["legs"][0]["live_checkpoint_stop"])
+        self.assertEqual(1.5, route["legs"][0]["live_segment_minutes"])
+        self.assertEqual(1.0, route["legs"][0]["static_remainder_minutes"])
+        self.assertEqual("medium", route["legs"][0]["confidence"])
+        self.assertIsNone(route["legs"][0]["realtime_failure_reason"])
         self.assertEqual(5.0, route["legs"][1]["wait_minutes"])
         self.assertEqual(13.0, route["total_minutes"])
 
