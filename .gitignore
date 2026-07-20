@@ -18,6 +18,7 @@ data/raw/
 data/*.db
 csv/
 *.csv
+!data/curation/*.csv
 data/standard_csv/*.csv
 
 # Local project notes
