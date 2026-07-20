@@ -48,13 +48,17 @@ class RealtimeCandidateLimitTest(unittest.TestCase):
             return []
 
         with patch.object(transit, "get_route_vehicle_locations", side_effect=fake_vehicle_locations), \
-             patch.object(transit, "get_arrival_info", return_value=None):
+             patch.object(
+                 transit,
+                 "get_arrival_info",
+                 return_value={"minutes": 3, "arrprevstationcnt": 2},
+             ):
             result = transit.recommend_bus_routes("성심당", "대전시립박물관")
 
         self.assertEqual(3, len(result.get("routes", [])))
-        self.assertLessEqual(len(calls), 3)
+        self.assertEqual(3, len(calls))
         self.assertEqual(
-            {"board_arrival_unavailable"},
+            {"vehicle_locations_unavailable"},
             {
                 route["legs"][0]["realtime_failure_reason"]
                 for route in result["routes"]
@@ -196,6 +200,68 @@ class FirstLegRealtimeIntegrationTest(unittest.TestCase):
 
         self.assertEqual(
             "live_checkpoint_unavailable",
+            refined[0]["realtime_failure_reason"],
+        )
+
+    def test_boarding_vehicle_unmatched_reason_is_preserved(self):
+        vehicles = [{"vehicle_no": "AFTER-BOARD", "node_order": 3}]
+        with patch.object(
+            transit,
+            "get_arrival_info",
+            return_value={"minutes": 3, "arrprevstationcnt": 2},
+        ), patch.object(transit, "get_route_vehicle_locations", return_value=vehicles):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "boarding_vehicle_unmatched",
+            refined[0]["realtime_failure_reason"],
+        )
+
+    def test_checkpoint_arrival_unavailable_reason_is_preserved(self):
+        vehicles = [
+            {"vehicle_no": "TARGET", "node_order": 1},
+            {"vehicle_no": "LEADER", "node_order": 4},
+        ]
+
+        def arrival(stop_id, _route_id):
+            if stop_id == "S2":
+                return {"minutes": 3, "arrprevstationcnt": 2}
+            return None
+
+        with patch.object(transit, "get_arrival_info", side_effect=arrival), patch.object(
+            transit, "get_route_vehicle_locations", return_value=vehicles
+        ):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "checkpoint_arrival_unavailable",
+            refined[0]["realtime_failure_reason"],
+        )
+
+    def test_checkpoint_validation_failure_reason_is_preserved(self):
+        vehicles = [
+            {"vehicle_no": "TARGET", "node_order": 1},
+            {"vehicle_no": "LEADER", "node_order": 4},
+        ]
+
+        def arrival(stop_id, _route_id):
+            if stop_id == "S2":
+                return {"minutes": 3, "arrprevstationcnt": 2}
+            return {"minutes": 60, "arrprevstationcnt": 3}
+
+        with patch.object(transit, "get_arrival_info", side_effect=arrival), patch.object(
+            transit, "get_route_vehicle_locations", return_value=vehicles
+        ):
+            refined = transit._refine_legs_realtime(
+                self.by_route, self.coords, self.legs, graph=self.graph
+            )
+
+        self.assertEqual(
+            "checkpoint_validation_failed",
             refined[0]["realtime_failure_reason"],
         )
 
