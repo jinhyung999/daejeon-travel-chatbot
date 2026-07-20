@@ -7,9 +7,62 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from collectors.naver_search import NaverSearchClient
+
 
 DISTRICTS = ("대덕구", "유성구", "동구", "서구", "중구")
 NON_MEAL_TERMS = ("카페", "디저트", "베이커리", "숙박", "마트", "편의점")
+LOCATION_SEEDS = {
+    "대덕구": ("대덕구", "신탄진", "송촌동", "비래동", "오정동", "중리동"),
+    "유성구": (
+        "유성구",
+        "봉명동",
+        "궁동",
+        "어은동",
+        "관평동",
+        "전민동",
+        "노은동",
+        "지족동",
+        "원내동",
+    ),
+    "동구": ("동구", "대전역", "소제동", "가양동", "용운동", "판암동", "산내"),
+    "서구": (
+        "서구",
+        "둔산동",
+        "갈마동",
+        "월평동",
+        "도마동",
+        "관저동",
+        "만년동",
+        "탄방동",
+    ),
+    "중구": (
+        "중구",
+        "대흥동",
+        "은행동",
+        "선화동",
+        "오류동",
+        "유천동",
+        "산성동",
+        "보문산",
+    ),
+}
+FOOD_SEEDS = (
+    "맛집",
+    "한식",
+    "향토음식",
+    "노포",
+    "칼국수",
+    "국밥",
+    "냉면",
+    "두부두루치기",
+    "삼계탕",
+    "고기",
+    "해산물",
+    "중식",
+    "일식",
+    "분식",
+)
 
 
 @dataclass
@@ -203,3 +256,81 @@ def duplicate_status(
         ):
             possible = True
     return "possible" if possible else "clear"
+
+
+def iter_local_queries(district: str):
+    seen = set()
+    for location in LOCATION_SEEDS[district]:
+        for food in FOOD_SEEDS:
+            query = f"{location} {food}"
+            if query not in seen:
+                seen.add(query)
+                yield query
+
+
+def merge_candidate(rows: list[Candidate], incoming: Candidate) -> bool:
+    for current in rows:
+        same_address = normalize_address(
+            current.road_address or current.address
+        ) == normalize_address(incoming.road_address or incoming.address)
+        similar_name = (
+            SequenceMatcher(
+                None,
+                normalize_name(current.name),
+                normalize_name(incoming.name),
+            ).ratio()
+            >= 0.92
+        )
+        close = (
+            None
+            not in (
+                current.latitude,
+                current.longitude,
+                incoming.latitude,
+                incoming.longitude,
+            )
+            and distance_metres(
+                current.latitude,
+                current.longitude,
+                incoming.latitude,
+                incoming.longitude,
+            )
+            <= 50
+        )
+        if (same_address and similar_name) or (close and similar_name):
+            current.matched_queries.update(incoming.matched_queries)
+            current.local_hit_count += incoming.local_hit_count
+            current.comment_sort_hit_count += (
+                incoming.comment_sort_hit_count
+            )
+            return True
+    rows.append(incoming)
+    return False
+
+
+def collect_local_candidates(
+    client: NaverSearchClient,
+    district: str,
+    existing_rows: list[ExistingRestaurant],
+    *,
+    target_pool: int = 120,
+) -> list[Candidate]:
+    candidates = []
+    for query in iter_local_queries(district):
+        for sort in ("comment", "random"):
+            for item in client.search_local(query, sort):
+                candidate, reject_reason = candidate_from_item(
+                    item, district, query, sort
+                )
+                if reject_reason:
+                    continue
+                status = duplicate_status(candidate, existing_rows)
+                if status == "confirmed":
+                    continue
+                candidate.possible_duplicate = (
+                    "Y" if status == "possible" else ""
+                )
+                merge_candidate(candidates, candidate)
+        if len(candidates) >= target_pool:
+            break
+    return candidates

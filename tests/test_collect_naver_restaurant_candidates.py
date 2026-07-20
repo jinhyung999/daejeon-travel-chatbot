@@ -8,11 +8,30 @@ from scripts.collect_naver_restaurant_candidates import (
     Candidate,
     ExistingRestaurant,
     candidate_from_item,
+    collect_local_candidates,
     duplicate_status,
+    iter_local_queries,
     load_existing_restaurants,
+    merge_candidate,
     normalize_address,
     normalize_name,
 )
+
+
+class FakeSearchClient:
+    def __init__(self, local_by_call=None, blog_by_call=None):
+        self.local_by_call = list(local_by_call or [])
+        self.blog_by_call = list(blog_by_call or [])
+        self.local_calls = []
+        self.blog_calls = []
+
+    def search_local(self, query, sort):
+        self.local_calls.append((query, sort))
+        return self.local_by_call.pop(0) if self.local_by_call else []
+
+    def search_blog(self, query, sort):
+        self.blog_calls.append((query, sort))
+        return self.blog_by_call.pop(0)
 
 
 class CandidateNormalizationTest(unittest.TestCase):
@@ -161,6 +180,81 @@ class ExistingDuplicateTest(unittest.TestCase):
         )
 
         self.assertEqual(duplicate_status(candidate, existing), "possible")
+
+
+class LocalCollectionTest(unittest.TestCase):
+    def test_query_order_is_stable_and_contains_location_food_pairs(self):
+        queries = list(iter_local_queries("대덕구"))
+
+        self.assertEqual(queries[0], "대덕구 맛집")
+        self.assertIn("신탄진 칼국수", queries)
+        self.assertEqual(len(queries), len(set(queries)))
+
+    def test_merge_accumulates_queries_and_comment_hits(self):
+        first = Candidate(
+            "대덕구",
+            "식당",
+            "한식",
+            "대전 대덕구 중리동 1",
+            "",
+            36.3,
+            127.4,
+            "",
+        )
+        first.matched_queries = {"대덕구 맛집"}
+        first.local_hit_count = 1
+        second = Candidate(
+            "대덕구",
+            "식당",
+            "한식",
+            "대전 대덕구 중리동 1",
+            "",
+            36.3,
+            127.4,
+            "",
+        )
+        second.matched_queries = {"중리동 한식"}
+        second.local_hit_count = 1
+        second.comment_sort_hit_count = 1
+
+        merged = merge_candidate([first], second)
+
+        self.assertTrue(merged)
+        self.assertEqual(first.local_hit_count, 2)
+        self.assertEqual(first.comment_sort_hit_count, 1)
+        self.assertEqual(
+            first.matched_queries, {"대덕구 맛집", "중리동 한식"}
+        )
+
+    def test_collection_calls_both_sorts_and_drops_confirmed_existing(self):
+        item = {
+            "title": "기존식당",
+            "category": "한식",
+            "address": "대전광역시 동구 중앙로 1",
+            "mapx": "1274300000",
+            "mapy": "363300000",
+            "roadAddress": "",
+        }
+        client = FakeSearchClient(local_by_call=[[item], [item]])
+        existing = [
+            ExistingRestaurant(
+                "기존식당",
+                "대전광역시 동구 중앙로 1",
+                "동구",
+                36.33,
+                127.43,
+            )
+        ]
+
+        rows = collect_local_candidates(
+            client, "동구", existing, target_pool=1
+        )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            client.local_calls[:2],
+            [("동구 맛집", "comment"), ("동구 맛집", "random")],
+        )
 
 
 if __name__ == "__main__":
