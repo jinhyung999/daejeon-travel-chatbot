@@ -153,15 +153,35 @@ class RealtimeBusFailureTest(unittest.TestCase):
             self.assertIsNone(realtime_bus.get_arrival_minutes("DJB8000001", "DJB30300001"))
             request_get.assert_not_called()
 
-    def test_request_uses_single_short_timeout_before_static_fallback(self):
+    def test_request_retries_once_with_five_second_timeout(self):
+        response = Mock()
+        with patch.object(
+            realtime_bus.requests,
+            "get",
+            side_effect=[requests.Timeout, response],
+        ) as request_get, patch.object(realtime_bus.time, "sleep") as sleep:
+            self.assertIs(
+                response,
+                realtime_bus._request_with_retry("https://example.test", {}),
+            )
+
+        self.assertEqual(2, request_get.call_count)
+        request_get.assert_has_calls([
+            unittest.mock.call("https://example.test", params={}, timeout=5),
+            unittest.mock.call("https://example.test", params={}, timeout=5),
+        ])
+        sleep.assert_called_once_with(1)
+
+    def test_request_falls_back_after_two_timeouts(self):
         with patch.object(
             realtime_bus.requests,
             "get",
             side_effect=requests.Timeout,
         ) as request_get, patch.object(realtime_bus.time, "sleep") as sleep:
             self.assertIsNone(realtime_bus._request_with_retry("https://example.test", {}))
-            request_get.assert_called_once_with("https://example.test", params={}, timeout=2)
-            sleep.assert_not_called()
+
+        self.assertEqual(2, request_get.call_count)
+        sleep.assert_called_once_with(1)
 
 
 if __name__ == "__main__":
