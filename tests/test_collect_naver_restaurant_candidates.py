@@ -110,6 +110,11 @@ class CandidateNormalizationTest(unittest.TestCase):
             "address": "대전광역시 유성구 봉명동",
             "description": "배달전문 치킨점",
         }
+        food_street = {
+            "title": "보문산향토음식점거리",
+            "category": "여행,명소>먹자거리",
+            "address": "대전광역시 중구 대사동",
+        }
 
         self.assertEqual(
             candidate_from_item(wrong, "유성구", "q", "random")[1],
@@ -122,6 +127,10 @@ class CandidateNormalizationTest(unittest.TestCase):
         self.assertEqual(
             candidate_from_item(delivery, "유성구", "q", "random")[1],
             "delivery_only",
+        )
+        self.assertEqual(
+            candidate_from_item(food_street, "중구", "q", "random")[1],
+            "non_meal_category",
         )
 
 

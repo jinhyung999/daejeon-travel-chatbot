@@ -14,7 +14,7 @@
 - Do not persist raw Naver API responses, blog titles, blog snippets, blog bodies, images, or author personal data.
 - Treat automatic scores only as review ordering; every exported row starts with `review_status=pending`.
 - Preserve separate branches of the same brand when address and coordinates differ.
-- Exclude a candidate as an existing duplicate only when normalized name and address agree, or name similarity is at least `0.92` and coordinates are at most `50` metres apart.
+- Exclude a candidate as an existing duplicate when its normalized full name and district match an existing row, when normalized name and address agree, or when name similarity is at least `0.92` and coordinates are at most `50` metres apart.
 - Do not pad a district with duplicated or low-quality rows when fewer than 80 eligible candidates are available.
 - Write `data/curation/restaurant_candidates.csv` as RFC 4180 UTF-8 without BOM and normalize text fields to one physical line.
 - Keep Naver API usage to candidate discovery and internal curation; confirm current Naver terms before external deployment.
@@ -531,6 +531,8 @@ def duplicate_status(candidate: Candidate, existing_rows: list[ExistingRestauran
     for existing in existing_rows:
         name_ratio = SequenceMatcher(None, candidate_name, normalize_name(existing.name)).ratio()
         existing_address = normalize_address(existing.address)
+        if candidate_name == normalize_name(existing.name) and candidate.district == existing.district:
+            return "confirmed"
         if candidate_name == normalize_name(existing.name) and candidate_address == existing_address:
             return "confirmed"
         has_coordinates = None not in (
