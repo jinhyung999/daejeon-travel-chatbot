@@ -1,15 +1,23 @@
+import argparse
 import csv
 import html
 import math
+import os
 import re
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import quote_plus
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from collectors.naver_search import NaverSearchClient
+from dotenv import load_dotenv
 
 
 DISTRICTS = ("대덕구", "유성구", "동구", "서구", "중구")
@@ -92,6 +100,36 @@ LOW_VALUE_TERMS = (
     "도미노피자",
     "피자헛",
     "미스터피자",
+)
+FIELDNAMES = [
+    "review_status",
+    "district",
+    "name",
+    "category",
+    "address",
+    "road_address",
+    "latitude",
+    "longitude",
+    "naver_link",
+    "blog_search_url",
+    "matched_queries",
+    "local_hit_count",
+    "comment_sort_hit_count",
+    "blog_result_count",
+    "recent_blog_count",
+    "distinct_blogger_count",
+    "latest_post_date",
+    "recommendation_score",
+    "recommendation_reason",
+    "possible_duplicate",
+    "reject_reason",
+]
+DEFAULT_EXISTING_CSV = (
+    REPO_ROOT / "data" / "curation" / "restaurant_recommendations.csv"
+)
+DEFAULT_DB = REPO_ROOT / "db" / "travel.db"
+DEFAULT_OUTPUT = (
+    REPO_ROOT / "data" / "curation" / "restaurant_candidates.csv"
 )
 
 
@@ -454,3 +492,173 @@ def score_candidate(candidate: Candidate) -> int:
         "; ".join(reasons) or "지역검색 후보"
     )
     return candidate.recommendation_score
+
+
+def select_candidates(
+    candidates: list[Candidate], limit: int
+) -> list[Candidate]:
+    return sorted(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.recommendation_score > 0
+        ),
+        key=lambda candidate: (
+            -candidate.recommendation_score,
+            candidate.name,
+        ),
+    )[:limit]
+
+
+def candidate_to_row(candidate: Candidate) -> dict:
+    return {
+        "review_status": "pending",
+        "district": candidate.district,
+        "name": single_line(candidate.name),
+        "category": single_line(candidate.category),
+        "address": single_line(candidate.address),
+        "road_address": single_line(candidate.road_address),
+        "latitude": (
+            "" if candidate.latitude is None else f"{candidate.latitude:.7f}"
+        ),
+        "longitude": (
+            ""
+            if candidate.longitude is None
+            else f"{candidate.longitude:.7f}"
+        ),
+        "naver_link": single_line(candidate.naver_link),
+        "blog_search_url": build_blog_search_url(candidate),
+        "matched_queries": " | ".join(sorted(candidate.matched_queries)),
+        "local_hit_count": candidate.local_hit_count,
+        "comment_sort_hit_count": candidate.comment_sort_hit_count,
+        "blog_result_count": candidate.blog_result_count,
+        "recent_blog_count": candidate.recent_blog_count,
+        "distinct_blogger_count": candidate.distinct_blogger_count,
+        "latest_post_date": candidate.latest_post_date,
+        "recommendation_score": candidate.recommendation_score,
+        "recommendation_reason": single_line(
+            candidate.recommendation_reason
+        ),
+        "possible_duplicate": candidate.possible_duplicate,
+        "reject_reason": single_line(candidate.reject_reason),
+    }
+
+
+def write_candidates(
+    candidates: list[Candidate], output_path: Path
+) -> None:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(
+            candidate_to_row(candidate) for candidate in candidates
+        )
+    temp_path.replace(output_path)
+
+
+def validate_output_rows(
+    candidates: list[Candidate], existing_rows: list[ExistingRestaurant]
+) -> list[str]:
+    errors = []
+    for candidate in candidates:
+        if candidate.district not in (
+            candidate.road_address or candidate.address
+        ):
+            errors.append(f"district/address mismatch: {candidate.name}")
+        if duplicate_status(candidate, existing_rows) == "confirmed":
+            errors.append(f"confirmed duplicate: {candidate.name}")
+    return errors
+
+
+def run_collection(
+    *,
+    client,
+    districts,
+    existing_rows,
+    output_path,
+    max_per_district,
+    skip_blog,
+    dry_run,
+    today,
+) -> dict[str, int]:
+    if dry_run:
+        return {district: 0 for district in districts}
+
+    selected_all = []
+    summary = {}
+    for district in districts:
+        target_pool = max(
+            max_per_district, math.ceil(max_per_district * 1.2)
+        )
+        candidates = collect_local_candidates(
+            client,
+            district,
+            existing_rows,
+            target_pool=target_pool,
+        )
+        for candidate in candidates:
+            if not skip_blog:
+                enrich_blog_metrics(client, candidate, today=today)
+            score_candidate(candidate)
+        selected = select_candidates(candidates, max_per_district)
+        selected_all.extend(selected)
+        summary[district] = len(selected)
+
+    errors = validate_output_rows(selected_all, existing_rows)
+    if errors:
+        raise RuntimeError(
+            "Output validation failed: " + "; ".join(errors)
+        )
+    if output_path is not None:
+        write_candidates(selected_all, Path(output_path))
+    return summary
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="네이버 API로 대전 음식점 검수 후보를 수집합니다."
+    )
+    parser.add_argument("--district", choices=DISTRICTS)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--max-per-district", type=int, default=100)
+    parser.add_argument("--skip-blog", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    if args.max_per_district < 1:
+        raise SystemExit("--max-per-district must be at least 1")
+    load_dotenv(REPO_ROOT / ".env")
+    existing = load_existing_restaurants(DEFAULT_EXISTING_CSV, DEFAULT_DB)
+    districts = [args.district] if args.district else list(DISTRICTS)
+    client = None
+    if not args.dry_run:
+        client = NaverSearchClient(
+            os.getenv("NAVER_CLIENT_ID", ""),
+            os.getenv("NAVER_CLIENT_SECRET", ""),
+        )
+    summary = run_collection(
+        client=client,
+        districts=districts,
+        existing_rows=existing,
+        output_path=args.output,
+        max_per_district=args.max_per_district,
+        skip_blog=args.skip_blog,
+        dry_run=args.dry_run,
+        today=date.today(),
+    )
+    for district in districts:
+        count = summary[district]
+        shortage = (
+            max(0, 80 - count) if args.max_per_district >= 80 else 0
+        )
+        print(f"{district}: candidates={count} shortage={shortage}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,8 @@
 import csv
+import locale
 import sqlite3
+import subprocess
+import sys
 import unittest
 import uuid
 from datetime import date
@@ -8,6 +11,7 @@ from pathlib import Path
 from scripts.collect_naver_restaurant_candidates import (
     Candidate,
     ExistingRestaurant,
+    FIELDNAMES,
     build_blog_search_url,
     candidate_from_item,
     collect_local_candidates,
@@ -18,7 +22,11 @@ from scripts.collect_naver_restaurant_candidates import (
     merge_candidate,
     normalize_address,
     normalize_name,
+    run_collection,
     score_candidate,
+    select_candidates,
+    validate_output_rows,
+    write_candidates,
 )
 
 
@@ -359,6 +367,157 @@ class BlogEnrichmentTest(unittest.TestCase):
         )
         self.assertIn("지역성", local.recommendation_reason)
         self.assertIn("배달형 음식 감점", generic.recommendation_reason)
+
+
+class CsvExportTest(unittest.TestCase):
+    def test_selects_positive_scores_in_stable_order_and_limit(self):
+        a = Candidate(
+            "서구", "가식당", "한식", "대전 서구", "", None, None, ""
+        )
+        b = Candidate(
+            "서구", "나식당", "한식", "대전 서구", "", None, None, ""
+        )
+        c = Candidate(
+            "서구", "다식당", "한식", "대전 서구", "", None, None, ""
+        )
+        a.recommendation_score = 20
+        b.recommendation_score = 30
+        c.recommendation_score = 0
+
+        selected = select_candidates([a, b, c], 2)
+
+        self.assertEqual([row.name for row in selected], ["나식당", "가식당"])
+
+    def test_atomic_writer_creates_parseable_single_line_csv(self):
+        candidate = Candidate(
+            "서구",
+            "식당\n본점",
+            "한식",
+            "대전 서구\n둔산동",
+            "",
+            36.3,
+            127.3,
+            "",
+        )
+        candidate.recommendation_score = 10
+        prefix = f".tmp_candidate_export_{uuid.uuid4().hex}"
+        output = Path.cwd() / f"{prefix}.csv"
+        try:
+            write_candidates([candidate], output)
+            with output.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+        finally:
+            output.unlink(missing_ok=True)
+            output.with_suffix(".csv.tmp").unlink(missing_ok=True)
+
+        self.assertEqual(list(rows[0]), FIELDNAMES)
+        self.assertEqual(rows[0]["review_status"], "pending")
+        self.assertEqual(rows[0]["name"], "식당 본점")
+        self.assertNotIn("\n", rows[0]["address"])
+
+    def test_validation_rejects_wrong_district_and_confirmed_duplicate(self):
+        candidate = Candidate(
+            "유성구",
+            "기존",
+            "한식",
+            "대전 서구 둔산동",
+            "",
+            None,
+            None,
+            "",
+        )
+        existing = [
+            ExistingRestaurant("기존", "대전 서구 둔산동", "서구")
+        ]
+
+        errors = validate_output_rows([candidate], existing)
+
+        self.assertIn("district/address mismatch: 기존", errors)
+        self.assertIn("confirmed duplicate: 기존", errors)
+
+
+class CollectionOrchestratorTest(unittest.TestCase):
+    def test_dry_run_validates_inputs_without_search_calls(self):
+        client = FakeSearchClient()
+
+        summary = run_collection(
+            client=client,
+            districts=["대덕구"],
+            existing_rows=[],
+            output_path=None,
+            max_per_district=5,
+            skip_blog=False,
+            dry_run=True,
+            today=date(2026, 7, 20),
+        )
+
+        self.assertEqual(summary, {"대덕구": 0})
+        self.assertEqual(client.local_calls, [])
+
+    def test_orchestrator_scores_selects_and_writes_rows(self):
+        item = {
+            "title": "새칼국수",
+            "category": "한식>칼국수",
+            "address": "대전광역시 대덕구 중리동 1",
+            "mapx": "1274000000",
+            "mapy": "363000000",
+            "roadAddress": "",
+        }
+        blog = blog_response(10, [blog_item("a", "20260701")])
+        client = FakeSearchClient(
+            local_by_call=[[item], [item]],
+            blog_by_call=[blog, blog],
+        )
+        output = Path.cwd() / f".tmp_orchestrator_{uuid.uuid4().hex}.csv"
+        try:
+            summary = run_collection(
+                client=client,
+                districts=["대덕구"],
+                existing_rows=[],
+                output_path=output,
+                max_per_district=1,
+                skip_blog=False,
+                dry_run=False,
+                today=date(2026, 7, 20),
+            )
+            with output.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+        finally:
+            output.unlink(missing_ok=True)
+            output.with_suffix(".csv.tmp").unlink(missing_ok=True)
+
+        self.assertEqual(summary, {"대덕구": 1})
+        self.assertEqual(rows[0]["name"], "새칼국수")
+
+
+class CollectorCliTest(unittest.TestCase):
+    def test_script_runs_directly_in_dry_run_mode(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "collect_naver_restaurant_candidates.py"
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--dry-run",
+                "--district",
+                "대덕구",
+                "--max-per-district",
+                "5",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            encoding=locale.getpreferredencoding(False),
+            errors="replace",
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("대덕구: candidates=0 shortage=0", result.stdout)
 
 
 if __name__ == "__main__":
