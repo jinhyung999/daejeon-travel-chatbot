@@ -195,24 +195,28 @@ class ExistingDuplicateTest(unittest.TestCase):
         self.assertEqual(duplicate_status(same, existing), "confirmed")
         self.assertEqual(duplicate_status(other_branch, existing), "clear")
 
-    def test_marks_unresolved_same_name_as_possible(self):
+    def test_confirms_exact_same_name_in_same_district_after_address_change(self):
         existing = [
             ExistingRestaurant(
-                "한밭식당", "대전 동구 중앙로 1", "동구"
+                "오씨칼국수",
+                "대전 동구 옛신탄진로 13",
+                "동구",
+                36.346,
+                127.432,
             )
         ]
         candidate = Candidate(
             "동구",
-            "한밭식당",
+            "오씨칼국수",
             "한식",
             "",
-            "대전 동구 새길 2",
-            None,
-            None,
+            "대전 동구 중앙로204번길 75",
+            36.3278007,
+            127.4339368,
             "",
         )
 
-        self.assertEqual(duplicate_status(candidate, existing), "possible")
+        self.assertEqual(duplicate_status(candidate, existing), "confirmed")
 
 
 class LocalCollectionTest(unittest.TestCase):

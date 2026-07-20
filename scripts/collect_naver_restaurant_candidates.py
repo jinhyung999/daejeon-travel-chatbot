@@ -297,6 +297,11 @@ def duplicate_status(
         existing_address = normalize_address(existing.address)
         if (
             candidate_name == existing_name
+            and candidate.district == existing.district
+        ):
+            return "confirmed"
+        if (
+            candidate_name == existing_name
             and candidate_address == existing_address
         ):
             return "confirmed"
