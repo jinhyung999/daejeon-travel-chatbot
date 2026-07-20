@@ -2,19 +2,23 @@ import csv
 import sqlite3
 import unittest
 import uuid
+from datetime import date
 from pathlib import Path
 
 from scripts.collect_naver_restaurant_candidates import (
     Candidate,
     ExistingRestaurant,
+    build_blog_search_url,
     candidate_from_item,
     collect_local_candidates,
     duplicate_status,
+    enrich_blog_metrics,
     iter_local_queries,
     load_existing_restaurants,
     merge_candidate,
     normalize_address,
     normalize_name,
+    score_candidate,
 )
 
 
@@ -32,6 +36,27 @@ class FakeSearchClient:
     def search_blog(self, query, sort):
         self.blog_calls.append((query, sort))
         return self.blog_by_call.pop(0)
+
+
+def blog_item(blogger_id, postdate):
+    return {
+        "title": "식당 방문기",
+        "link": f"https://blog.naver.com/{blogger_id}/1",
+        "description": "식당 후기 요약",
+        "bloggername": f"블로그 {blogger_id}",
+        "bloggerlink": f"https://blog.naver.com/{blogger_id}",
+        "postdate": postdate,
+    }
+
+
+def blog_response(total, items):
+    return {
+        "lastBuildDate": "Mon, 20 Jul 2026 12:00:00 +0900",
+        "total": total,
+        "start": 1,
+        "display": len(items),
+        "items": items,
+    }
 
 
 class CandidateNormalizationTest(unittest.TestCase):
@@ -255,6 +280,85 @@ class LocalCollectionTest(unittest.TestCase):
             client.local_calls[:2],
             [("동구 맛집", "comment"), ("동구 맛집", "random")],
         )
+
+
+class BlogEnrichmentTest(unittest.TestCase):
+    def test_aggregates_total_recent_posts_distinct_bloggers_and_latest_date(self):
+        similarity = blog_response(
+            321,
+            [
+                blog_item("a", "20260501"),
+                blog_item("a", "20250401"),
+                blog_item("b", "20260301"),
+            ],
+        )
+        by_date = blog_response(
+            321,
+            [
+                blog_item("c", "20260701"),
+                blog_item("d", "20250801"),
+                blog_item("e", "20240701"),
+            ],
+        )
+        client = FakeSearchClient(blog_by_call=[similarity, by_date])
+        candidate = Candidate(
+            "중구",
+            "대전칼국수",
+            "한식>칼국수",
+            "대전 중구 대흥동 1",
+            "",
+            None,
+            None,
+            "",
+        )
+
+        enrich_blog_metrics(client, candidate, today=date(2026, 7, 20))
+
+        self.assertEqual(candidate.blog_result_count, 321)
+        self.assertEqual(candidate.recent_blog_count, 2)
+        self.assertEqual(candidate.distinct_blogger_count, 2)
+        self.assertEqual(candidate.latest_post_date, "20260701")
+        self.assertIn("where=blog", build_blog_search_url(candidate))
+        self.assertEqual(
+            client.blog_calls,
+            [("대전칼국수 대흥동", "sim"), ("대전칼국수 대흥동", "date")],
+        )
+
+    def test_scores_local_value_and_penalizes_generic_delivery_food(self):
+        local = Candidate(
+            "중구",
+            "원도심 노포 칼국수 본점",
+            "한식>칼국수",
+            "대전 중구 대흥동",
+            "",
+            None,
+            None,
+            "",
+        )
+        local.local_hit_count = 4
+        local.comment_sort_hit_count = 3
+        local.blog_result_count = 300
+        local.recent_blog_count = 8
+        local.distinct_blogger_count = 9
+        generic = Candidate(
+            "중구",
+            "전국치킨",
+            "음식점>치킨",
+            "대전 중구 대흥동",
+            "",
+            None,
+            None,
+            "",
+        )
+
+        score_candidate(local)
+        score_candidate(generic)
+
+        self.assertGreater(
+            local.recommendation_score, generic.recommendation_score
+        )
+        self.assertIn("지역성", local.recommendation_reason)
+        self.assertIn("배달형 음식 감점", generic.recommendation_reason)
 
 
 if __name__ == "__main__":

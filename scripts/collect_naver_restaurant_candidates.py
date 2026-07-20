@@ -4,8 +4,10 @@ import math
 import re
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from collectors.naver_search import NaverSearchClient
 
@@ -62,6 +64,34 @@ FOOD_SEEDS = (
     "중식",
     "일식",
     "분식",
+)
+LOCAL_VALUE_TERMS = (
+    "노포",
+    "향토",
+    "본점",
+    "전통시장",
+    "대전",
+    "칼국수",
+    "두부두루치기",
+)
+LOW_VALUE_TERMS = (
+    "치킨",
+    "피자",
+    "햄버거",
+    "패스트푸드",
+    "도시락",
+    "롯데리아",
+    "맥도날드",
+    "버거킹",
+    "kfc",
+    "서브웨이",
+    "맘스터치",
+    "bbq",
+    "bhc",
+    "교촌치킨",
+    "도미노피자",
+    "피자헛",
+    "미스터피자",
 )
 
 
@@ -334,3 +364,93 @@ def collect_local_candidates(
         if len(candidates) >= target_pool:
             break
     return candidates
+
+
+def blog_query(candidate: Candidate) -> str:
+    match = re.search(
+        r"([가-힣]+동)", candidate.road_address or candidate.address
+    )
+    location = match.group(1) if match else candidate.district
+    return f"{candidate.name} {location}"
+
+
+def build_blog_search_url(candidate: Candidate) -> str:
+    return (
+        "https://search.naver.com/search.naver?where=blog&query="
+        + quote_plus(blog_query(candidate))
+    )
+
+
+def parse_post_date(value: str) -> date | None:
+    try:
+        return date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+    except (TypeError, ValueError):
+        return None
+
+
+def enrich_blog_metrics(
+    client: NaverSearchClient, candidate: Candidate, *, today: date
+) -> None:
+    query = blog_query(candidate)
+    similarity = client.search_blog(query, "sim")
+    recent = client.search_blog(query, "date")
+    candidate.blog_result_count = int(similarity.get("total") or 0)
+    bloggers = {
+        single_line(item.get("bloggerlink") or item.get("bloggername"))
+        for item in similarity.get("items", [])
+        if single_line(item.get("bloggerlink") or item.get("bloggername"))
+    }
+    candidate.distinct_blogger_count = len(bloggers)
+    cutoff = date(today.year - 1, today.month, today.day)
+    parsed_dates = [
+        parsed
+        for parsed in (
+            parse_post_date(item.get("postdate", ""))
+            for item in recent.get("items", [])
+        )
+        if parsed is not None
+    ]
+    candidate.recent_blog_count = sum(
+        parsed >= cutoff for parsed in parsed_dates
+    )
+    candidate.latest_post_date = (
+        max(parsed_dates).strftime("%Y%m%d") if parsed_dates else ""
+    )
+
+
+def score_candidate(candidate: Candidate) -> int:
+    combined = f"{candidate.name} {candidate.category}".lower()
+    local_signals = [
+        term for term in LOCAL_VALUE_TERMS if term.lower() in combined
+    ]
+    low_value_signals = [
+        term for term in LOW_VALUE_TERMS if term.lower() in combined
+    ]
+    score = 0
+    score += min(20, candidate.local_hit_count * 4)
+    score += min(15, candidate.comment_sort_hit_count * 3)
+    score += 15 if ">" in candidate.category else 10
+    score += min(
+        10, int(math.log10(candidate.blog_result_count + 1) * 3)
+    )
+    score += min(15, candidate.recent_blog_count * 2)
+    score += min(10, candidate.distinct_blogger_count)
+    score += min(15, len(local_signals) * 5)
+    score -= min(30, len(low_value_signals) * 15)
+    candidate.recommendation_score = max(0, min(100, score))
+
+    reasons = []
+    if local_signals:
+        reasons.append("지역성: " + ", ".join(local_signals))
+    if candidate.recent_blog_count:
+        reasons.append(
+            f"최근 12개월 블로그 {candidate.recent_blog_count}건"
+        )
+    if low_value_signals:
+        reasons.append(
+            "배달형 음식 감점: " + ", ".join(low_value_signals)
+        )
+    candidate.recommendation_reason = (
+        "; ".join(reasons) or "지역검색 후보"
+    )
+    return candidate.recommendation_score
