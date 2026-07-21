@@ -96,6 +96,26 @@ class ExportRestaurantRecommendationsTest(unittest.TestCase):
         self.assertEqual(row["representative_food"], "칼국수 / 8,000원")
         self.assertEqual(row["source_summary"], "칼국수 전문점")
 
+    def test_normalizes_multiline_overview_to_one_physical_csv_line(self):
+        conn = make_export_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO place VALUES (?, ?, 'restaurant', ?, ?, ?, ?, ?)",
+            (
+                "multiline",
+                "한줄 식당",
+                "대전광역시 중구",
+                "tourapi",
+                "첫째 줄\r\n둘째 줄\n셋째 줄",
+                "{}",
+                "\ucd94\ucc9c",
+            ),
+        )
+
+        row = collect_recommendations(conn)[0]
+
+        self.assertEqual(row["overview"], "첫째 줄 둘째 줄 셋째 줄")
+
 
 if __name__ == "__main__":
     unittest.main()

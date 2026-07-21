@@ -1,9 +1,11 @@
+import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 import hashlib
 import json
 import math
+from pathlib import Path
 import sqlite3
 import unicodedata
 
@@ -274,3 +276,41 @@ def apply_recommendations(conn, existing_csv, approved_csv):
         source_overlap=source_overlap,
         recommended_total=recommended_total,
     )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Apply approved restaurant recommendations to the place database."
+    )
+    parser.add_argument("--db", type=Path, required=True)
+    parser.add_argument("--existing-csv", type=Path, required=True)
+    parser.add_argument("--approved-csv", type=Path, required=True)
+    parser.add_argument("--apply", action="store_true")
+    args = parser.parse_args(argv)
+
+    source = sqlite3.connect(args.db)
+    try:
+        if args.apply:
+            target = source
+        else:
+            target = sqlite3.connect(":memory:")
+            source.backup(target)
+
+        try:
+            stats = apply_recommendations(
+                target,
+                args.existing_csv,
+                args.approved_csv,
+            )
+        finally:
+            if target is not source:
+                target.close()
+    finally:
+        source.close()
+
+    summary = {"mode": "apply" if args.apply else "dry-run", **asdict(stats)}
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

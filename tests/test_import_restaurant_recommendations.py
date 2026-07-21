@@ -1,6 +1,7 @@
 import csv
 from contextlib import redirect_stdout
 from dataclasses import asdict
+import hashlib
 from io import StringIO
 import json
 from pathlib import Path
@@ -393,3 +394,73 @@ class RecommendationImportTest(unittest.TestCase):
         self.assertEqual(stats.source_overlap, 1)
         self.assertEqual(stats.recommended_total, 2)
         self.assertEqual(marked, 2)
+
+
+class RecommendationImportCliTest(unittest.TestCase):
+    def setUp(self):
+        token = uuid.uuid4().hex
+        self.db_path = REPO_ROOT / f".tmp_cli_{token}.db"
+        self.existing_path = REPO_ROOT / f".tmp_cli_existing_{token}.csv"
+        self.approved_path = REPO_ROOT / f".tmp_cli_approved_{token}.csv"
+
+        conn = make_place_db(self.db_path, with_recommend=True)
+        insert_place(conn, "existing", "홍길동 식당", 36.35, 127.38)
+        conn.commit()
+        conn.close()
+
+        with self.existing_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=["place_id"])
+            writer.writeheader()
+            writer.writerow({"place_id": "existing"})
+        with self.approved_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=APPROVED_FIELDS)
+            writer.writeheader()
+            writer.writerow(asdict(candidate_at("신규 식당", 36.40, 127.42)))
+
+    def tearDown(self):
+        self.db_path.unlink(missing_ok=True)
+        self.existing_path.unlink(missing_ok=True)
+        self.approved_path.unlink(missing_ok=True)
+
+    def _run_cli(self, apply=False):
+        arguments = [
+            "--db", str(self.db_path),
+            "--existing-csv", str(self.existing_path),
+            "--approved-csv", str(self.approved_path),
+        ]
+        if apply:
+            arguments.append("--apply")
+        output = StringIO()
+        with redirect_stdout(output):
+            importer.main(arguments)
+        return json.loads(output.getvalue())
+
+    def test_dry_run_reports_counts_without_mutating_database(self):
+        before = hashlib.sha256(self.db_path.read_bytes()).hexdigest()
+
+        summary = self._run_cli()
+
+        after = hashlib.sha256(self.db_path.read_bytes()).hexdigest()
+        self.assertEqual(after, before)
+        self.assertEqual(summary["mode"], "dry-run")
+        self.assertEqual(summary["existing_marked"], 1)
+        self.assertEqual(summary["matched_enriched"], 0)
+        self.assertEqual(summary["inserted"], 1)
+        self.assertEqual(summary["source_overlap"], 0)
+        self.assertEqual(summary["recommended_total"], 2)
+
+    def test_apply_persists_changes_and_reports_counts(self):
+        summary = self._run_cli(apply=True)
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            recommended = conn.execute(
+                "SELECT COUNT(*) FROM place WHERE recommend=?",
+                ("\ucd94\ucc9c",),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(summary["mode"], "apply")
+        self.assertEqual(summary["inserted"], 1)
+        self.assertEqual(summary["recommended_total"], 2)
+        self.assertEqual(recommended, 2)
