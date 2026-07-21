@@ -13,11 +13,14 @@ CREATE TABLE IF NOT EXISTS place (
   source_api    TEXT,
   extra_json    TEXT,
   overview      TEXT,
-  homepage      TEXT
+  homepage      TEXT,
+  recommend     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_place_category ON place(category);
 CREATE INDEX IF NOT EXISTS idx_place_latlng ON place(lat, lng);
+CREATE INDEX IF NOT EXISTS idx_place_category_recommend
+ON place(category, recommend);
 
 CREATE TABLE IF NOT EXISTS event (
   event_id    TEXT PRIMARY KEY,
