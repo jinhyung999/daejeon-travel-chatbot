@@ -53,7 +53,12 @@ def collect_recommendations(conn):
 
     recommendations = []
     for place in places:
-        overview = " ".join((place["overview"] or "").split())
+        overview = (
+            (place["overview"] or "")
+            .replace("\r\n", " ")
+            .replace("\r", " ")
+            .replace("\n", " ")
+        )
         extra = _parse_extra_json(place["extra_json"])
         recommendation = extra.get("recommendation")
         recommendation = recommendation if isinstance(recommendation, dict) else {}
