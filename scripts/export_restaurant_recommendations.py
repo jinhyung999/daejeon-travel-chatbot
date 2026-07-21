@@ -46,7 +46,7 @@ def collect_recommendations(conn):
         """
         SELECT place_id, name, category, address, source_api, overview, extra_json
         FROM place
-        WHERE category = 'restaurant'
+        WHERE category = 'restaurant' AND recommend = '추천'
         ORDER BY place_id
         """
     ).fetchall()
@@ -55,15 +55,14 @@ def collect_recommendations(conn):
     for place in places:
         overview = (place["overview"] or "").strip()
         extra = _parse_extra_json(place["extra_json"])
-        representative_food = str(extra.get("rprsFod") or "").strip()
-        source_summary = str(extra.get("restrntSumm") or "").strip()
-        has_daejeon_food_detail = (
-            place["source_api"] == "daejeon_food"
-            and bool(representative_food or source_summary)
-        )
-
-        if not overview and not has_daejeon_food_detail:
-            continue
+        recommendation = extra.get("recommendation")
+        recommendation = recommendation if isinstance(recommendation, dict) else {}
+        representative_food = str(
+            recommendation.get("detailed_category") or extra.get("rprsFod") or ""
+        ).strip()
+        source_summary = str(
+            recommendation.get("source") or extra.get("restrntSumm") or ""
+        ).strip()
 
         recommendations.append(
             {
@@ -74,9 +73,9 @@ def collect_recommendations(conn):
                 "district": _district_from_address(place["address"]),
                 "recommend": "추천",
                 "source_api": place["source_api"] or "",
-                "recommendation_basis": (
-                    "valid_overview" if overview else "daejeon_food_extra_json"
-                ),
+                "recommendation_basis": str(
+                    recommendation.get("reason") or ""
+                ).strip(),
                 "overview": overview,
                 "representative_food": representative_food,
                 "source_summary": source_summary,

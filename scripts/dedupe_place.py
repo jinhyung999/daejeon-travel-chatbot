@@ -40,13 +40,13 @@ SOURCE_PRIORITY = {
 # 병합 시 대표 행의 결측을 채울 컬럼들
 MERGE_COLUMNS = [
     "address", "open_time", "close_day", "fee", "has_parking",
-    "tel", "overview", "homepage", "extra_json",
+    "tel", "overview", "homepage", "extra_json", "recommend",
 ]
 
 ALL_COLUMNS = [
     "place_id", "name", "category", "address", "lat", "lng", "open_time",
     "close_day", "fee", "has_parking", "tel", "source_api", "extra_json",
-    "overview", "homepage",
+    "overview", "homepage", "recommend",
 ]
 
 

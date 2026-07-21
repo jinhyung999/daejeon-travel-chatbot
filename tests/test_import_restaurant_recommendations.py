@@ -10,6 +10,7 @@ import unittest
 import uuid
 
 from scripts import import_restaurant_recommendations as importer
+from scripts import dedupe_place
 from scripts.init_db import init_db
 
 
@@ -65,6 +66,10 @@ def make_place_db(database=":memory:", with_recommend=False):
 
 
 class RecommendSchemaTest(unittest.TestCase):
+    def test_dedupe_column_lists_preserve_recommend(self):
+        self.assertIn("recommend", dedupe_place.ALL_COLUMNS)
+        self.assertIn("recommend", dedupe_place.MERGE_COLUMNS)
+
     def test_schema_migration_is_idempotent(self):
         conn = make_place_db()
         self.addCleanup(conn.close)

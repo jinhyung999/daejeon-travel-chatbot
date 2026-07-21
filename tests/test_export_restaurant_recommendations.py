@@ -5,50 +5,96 @@ import unittest
 from scripts.export_restaurant_recommendations import collect_recommendations
 
 
-class ExportRestaurantRecommendationsTest(unittest.TestCase):
-    def test_exports_only_qualified_restaurants(self):
-        conn = sqlite3.connect(":memory:")
-        conn.execute(
-            """
-            CREATE TABLE place (
-                place_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                category TEXT NOT NULL,
-                address TEXT,
-                source_api TEXT,
-                overview TEXT,
-                extra_json TEXT
-            )
-            """
+def make_export_db():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE place (
+            place_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            address TEXT,
+            source_api TEXT,
+            overview TEXT,
+            extra_json TEXT,
+            recommend TEXT
         )
+        """
+    )
+    return conn
+
+
+class ExportRestaurantRecommendationsTest(unittest.TestCase):
+    def test_exports_only_rows_with_recommend_flag(self):
+        conn = make_export_db()
+        self.addCleanup(conn.close)
         conn.executemany(
-            "INSERT INTO place VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO place VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                ("tour-1", "관광식당", "restaurant", "대전 동구 중앙로 1", "tourapi", "대표 메뉴가 포함된 충분한 소개", None),
-                (
-                    "food-1",
-                    "대전식당",
-                    "restaurant",
-                    "대전 서구 둔산로 2",
-                    "daejeon_food",
-                    None,
-                    json.dumps({"rprsFod": "칼국수 / 8,000원", "restrntSumm": "칼국수 전문점"}, ensure_ascii=False),
-                ),
-                ("cafe-1", "관광카페", "cafe", "대전 중구 중앙로 3", "tourapi", "소개가 있는 카페", None),
-                ("plain-1", "일반식당", "restaurant", "대전 유성구 대학로 4", "sbiz", None, "{}"),
+                ("yes", "추천 식당", "restaurant", "대전 중구", "tourapi", "소개", "{}", "추천"),
+                ("no", "일반 식당", "restaurant", "대전 서구", "tourapi", "소개", "{}", None),
+                ("cafe", "추천 카페", "cafe", "대전 동구", "tourapi", "소개", "{}", "추천"),
             ],
         )
 
         rows = collect_recommendations(conn)
-        conn.close()
 
-        self.assertEqual([row["place_id"] for row in rows], ["food-1", "tour-1"])
-        self.assertEqual({row.get("recommend") for row in rows}, {"추천"})
-        self.assertTrue(all("recommand" not in row for row in rows))
-        self.assertEqual(rows[0]["district"], "서구")
-        self.assertEqual(rows[0]["representative_food"], "칼국수 / 8,000원")
-        self.assertEqual(rows[0]["source_summary"], "칼국수 전문점")
-        self.assertEqual(rows[1]["recommendation_basis"], "valid_overview")
+        self.assertEqual([row["place_id"] for row in rows], ["yes"])
+
+    def test_exports_optional_fields_from_recommendation_extra_json(self):
+        conn = make_export_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO place VALUES (?, ?, 'restaurant', ?, ?, ?, ?, '추천')",
+            (
+                "naver-1",
+                "네이버 식당",
+                "대전 서구 둔산로 2",
+                "naver_search",
+                None,
+                json.dumps(
+                    {
+                        "recommendation": {
+                            "source": "naver_review",
+                            "detailed_category": "한식>칼국수",
+                            "reason": "지역성: 칼국수",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        row = collect_recommendations(conn)[0]
+
+        self.assertEqual(row["recommend"], "추천")
+        self.assertEqual(row["recommendation_basis"], "지역성: 칼국수")
+        self.assertEqual(row["representative_food"], "한식>칼국수")
+        self.assertEqual(row["source_summary"], "naver_review")
+
+    def test_preserves_legacy_optional_export_fields(self):
+        conn = make_export_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO place VALUES (?, ?, 'restaurant', ?, ?, ?, ?, '추천')",
+            (
+                "food-1",
+                "대전 식당",
+                "대전 서구 둔산로 2",
+                "daejeon_food",
+                None,
+                json.dumps(
+                    {"rprsFod": "칼국수 / 8,000원", "restrntSumm": "칼국수 전문점"},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        row = collect_recommendations(conn)[0]
+
+        self.assertEqual(row["district"], "서구")
+        self.assertEqual(row["representative_food"], "칼국수 / 8,000원")
+        self.assertEqual(row["source_summary"], "칼국수 전문점")
 
 
 if __name__ == "__main__":
