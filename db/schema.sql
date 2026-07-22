@@ -14,7 +14,13 @@ CREATE TABLE IF NOT EXISTS place (
   extra_json    TEXT,
   overview      TEXT,
   homepage      TEXT,
-  recommend     TEXT
+  recommend     TEXT,
+  concept_tag   TEXT,
+  photo_spot    INTEGER,
+  has_workshop  INTEGER,
+  blog_url_1    TEXT,
+  blog_url_2    TEXT,
+  blog_url_3    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_place_category ON place(category);
