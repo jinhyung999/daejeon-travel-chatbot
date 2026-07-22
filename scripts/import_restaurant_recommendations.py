@@ -9,6 +9,11 @@ from pathlib import Path
 import sqlite3
 import unicodedata
 
+try:
+    from scripts.recommendation_json import dump_json_object, load_json_object
+except ModuleNotFoundError:
+    from recommendation_json import dump_json_object, load_json_object
+
 
 SOURCE_PRIORITY = {
     "tourapi": 0,
@@ -16,6 +21,10 @@ SOURCE_PRIORITY = {
     "sbiz": 2,
     "naver_search": 3,
 }
+
+# Inclusive safety envelope covering Daejeon's administrative boundary.
+DAEJEON_LATITUDE_RANGE = (36.10, 36.55)
+DAEJEON_LONGITUDE_RANGE = (127.20, 127.60)
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,49 @@ def normalize_address(value):
     return "".join(char for char in text if char.isalnum())
 
 
+def _is_blank(value):
+    return not str(value or "").strip()
+
+
+def _coordinates_in_daejeon(latitude, longitude):
+    if latitude is None or longitude is None:
+        return False
+    try:
+        latitude = float(latitude)
+        longitude = float(longitude)
+    except (TypeError, ValueError):
+        return False
+    return (
+        math.isfinite(latitude)
+        and math.isfinite(longitude)
+        and DAEJEON_LATITUDE_RANGE[0]
+        <= latitude
+        <= DAEJEON_LATITUDE_RANGE[1]
+        and DAEJEON_LONGITUDE_RANGE[0]
+        <= longitude
+        <= DAEJEON_LONGITUDE_RANGE[1]
+    )
+
+
+def _coordinates_are_present_and_finite(latitude, longitude):
+    if latitude is None or longitude is None:
+        return False
+    try:
+        return math.isfinite(float(latitude)) and math.isfinite(float(longitude))
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_candidate(candidate):
+    if not _coordinates_in_daejeon(candidate.latitude, candidate.longitude):
+        raise ValueError(
+            "candidate coordinate must be finite and inside the documented "
+            "Daejeon bounding box "
+            f"lat={DAEJEON_LATITUDE_RANGE}, "
+            f"lng={DAEJEON_LONGITUDE_RANGE}: {candidate.name!r}"
+        )
+
+
 def haversine_metres(lat1, lng1, lat2, lng2):
     if any(value is None for value in (lat1, lng1, lat2, lng2)):
         return None
@@ -75,6 +127,8 @@ def haversine_metres(lat1, lng1, lat2, lng2):
 
 def name_is_similar(left, right):
     left, right = normalize_name(left), normalize_name(right)
+    if not left or not right:
+        return False
     contained = min(len(left), len(right)) >= 4 and (
         left in right or right in left
     )
@@ -83,6 +137,8 @@ def name_is_similar(left, right):
 
 def select_existing_place(candidate, places, preferred_ids):
     matches = []
+    candidate_name = normalize_name(candidate.name)
+    candidate_address = normalize_address(candidate.best_address)
     for place in places:
         distance = haversine_metres(
             candidate.latitude,
@@ -90,11 +146,15 @@ def select_existing_place(candidate, places, preferred_ids):
             place["lat"],
             place["lng"],
         )
-        exact = normalize_name(candidate.name) == normalize_name(place["name"])
+        place_name = normalize_name(place["name"])
+        place_address = normalize_address(place["address"])
+        exact = bool(candidate_name and place_name and candidate_name == place_name)
         fuzzy = name_is_similar(candidate.name, place["name"])
-        same_address = normalize_address(
-            candidate.best_address
-        ) == normalize_address(place["address"])
+        same_address = bool(
+            candidate_address
+            and place_address
+            and candidate_address == place_address
+        )
         if (
             (exact and distance is not None and distance <= 100)
             or (fuzzy and distance is not None and distance <= 50)
@@ -129,9 +189,7 @@ def ensure_recommend_schema(conn: sqlite3.Connection) -> None:
 
 
 def merge_recommendation_extra(raw_extra, candidate):
-    extra = json.loads(raw_extra or "{}")
-    if not isinstance(extra, dict):
-        raise ValueError("extra_json must contain an object")
+    extra = load_json_object(raw_extra)
     extra["recommendation"] = {
         "source": "naver_review",
         "detailed_category": candidate.category,
@@ -142,7 +200,7 @@ def merge_recommendation_extra(raw_extra, candidate):
         "naver_latitude": candidate.latitude,
         "naver_longitude": candidate.longitude,
     }
-    return json.dumps(extra, ensure_ascii=False, separators=(",", ":"))
+    return dump_json_object(extra)
 
 
 def stable_place_id(candidate):
@@ -170,7 +228,7 @@ def _read_existing_ids(path):
 def _read_approved_candidates(path):
     with open(path, encoding="utf-8-sig", newline="") as stream:
         for row in csv.DictReader(stream):
-            yield Candidate(
+            candidate = Candidate(
                 district=row["district"].strip(),
                 name=row["name"].strip(),
                 category=row["category"].strip(),
@@ -182,15 +240,55 @@ def _read_approved_candidates(path):
                 recommendation_score=int(row["recommendation_score"]),
                 recommendation_reason=row["recommendation_reason"].strip(),
             )
+            _validate_candidate(candidate)
+            yield candidate
 
 
 def _restaurant_places(conn):
     cursor = conn.execute(
-        "SELECT place_id, name, address, lat, lng, source_api, extra_json "
+        "SELECT place_id, name, address, lat, lng, source_api, extra_json, "
+        "homepage "
         "FROM place WHERE category='restaurant'"
     )
     columns = [description[0] for description in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _validate_import_postconditions(conn, preferred_ids):
+    resolved_preferred_ids = {
+        row[0]
+        for row in conn.execute(
+            "SELECT place_id FROM place "
+            "WHERE category='restaurant' AND recommend='추천'"
+        )
+        if row[0] in preferred_ids
+    }
+    unresolved = sorted(preferred_ids - resolved_preferred_ids)
+    if unresolved:
+        preview = ", ".join(unresolved[:5])
+        raise ValueError(
+            f"preferred recommendation IDs did not resolve: {preview}"
+        )
+
+    recommended_rows = conn.execute(
+        "SELECT place_id, lat, lng, extra_json FROM place "
+        "WHERE category='restaurant' AND recommend='추천'"
+    ).fetchall()
+    for place_id, latitude, longitude, extra_json in recommended_rows:
+        if not _coordinates_are_present_and_finite(latitude, longitude):
+            raise ValueError(
+                f"recommended place has invalid coordinate: {place_id}"
+            )
+        try:
+            load_json_object(extra_json, label=f"extra_json for {place_id}")
+        except ValueError as error:
+            raise ValueError(
+                f"recommended place has invalid JSON: {place_id}"
+            ) from error
+
+    integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    if integrity != "ok":
+        raise ValueError(f"database integrity postcondition failed: {integrity}")
 
 
 def apply_recommendations(conn, existing_csv, approved_csv):
@@ -201,6 +299,9 @@ def apply_recommendations(conn, existing_csv, approved_csv):
     inserted = 0
     source_overlap = 0
 
+    # sqlite3.Connection.__enter__ does not issue BEGIN, so start a savepoint
+    # before the schema migration to make DDL part of the same rollback boundary.
+    conn.execute("SAVEPOINT restaurant_recommendation_import")
     with conn:
         ensure_recommend_schema(conn)
         for place_id in sorted(preferred_ids):
@@ -224,14 +325,34 @@ def apply_recommendations(conn, existing_csv, approved_csv):
                 )
                 lat = candidate.latitude if replace_coordinates else match["lat"]
                 lng = candidate.longitude if replace_coordinates else match["lng"]
+                address = (
+                    candidate.best_address
+                    if _is_blank(match["address"])
+                    else match["address"]
+                )
+                homepage = (
+                    candidate.naver_link
+                    if _is_blank(match["homepage"])
+                    else match["homepage"]
+                )
                 conn.execute(
-                    "UPDATE place SET recommend='추천', extra_json=?, lat=?, lng=? "
+                    "UPDATE place SET recommend='추천', extra_json=?, lat=?, lng=?, "
+                    "address=?, homepage=? "
                     "WHERE place_id=?",
-                    (extra_json, lat, lng, match["place_id"]),
+                    (
+                        extra_json,
+                        lat,
+                        lng,
+                        address,
+                        homepage,
+                        match["place_id"],
+                    ),
                 )
                 match["extra_json"] = extra_json
                 match["lat"] = lat
                 match["lng"] = lng
+                match["address"] = address
+                match["homepage"] = homepage
                 matched_enriched += 1
                 source_overlap += match["place_id"] in preferred_ids
                 continue
@@ -240,8 +361,8 @@ def apply_recommendations(conn, existing_csv, approved_csv):
             conn.execute(
                 "INSERT INTO place "
                 "(place_id, name, category, address, lat, lng, source_api, "
-                "extra_json, recommend) "
-                "VALUES (?, ?, 'restaurant', ?, ?, ?, 'naver_search', ?, '추천')",
+                "extra_json, homepage, recommend) "
+                "VALUES (?, ?, 'restaurant', ?, ?, ?, 'naver_search', ?, ?, '추천')",
                 (
                     place_id,
                     candidate.name,
@@ -249,6 +370,7 @@ def apply_recommendations(conn, existing_csv, approved_csv):
                     candidate.latitude,
                     candidate.longitude,
                     extra_json,
+                    candidate.naver_link,
                 ),
             )
             places.append(
@@ -260,6 +382,7 @@ def apply_recommendations(conn, existing_csv, approved_csv):
                     "lng": candidate.longitude,
                     "source_api": "naver_search",
                     "extra_json": extra_json,
+                    "homepage": candidate.naver_link,
                 }
             )
             inserted += 1
@@ -268,6 +391,7 @@ def apply_recommendations(conn, existing_csv, approved_csv):
             "SELECT COUNT(*) FROM place "
             "WHERE category='restaurant' AND recommend='추천'"
         ).fetchone()[0]
+        _validate_import_postconditions(conn, preferred_ids)
 
     return ImportStats(
         existing_marked=existing_marked,
@@ -288,7 +412,16 @@ def main(argv=None):
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
 
-    source = sqlite3.connect(args.db)
+    if not args.db.is_file():
+        parser.error(f"database does not exist: {args.db}")
+
+    if args.apply:
+        source = sqlite3.connect(args.db)
+    else:
+        source = sqlite3.connect(
+            args.db.resolve().as_uri() + "?mode=ro",
+            uri=True,
+        )
     try:
         if args.apply:
             target = source
@@ -309,7 +442,14 @@ def main(argv=None):
         source.close()
 
     summary = {"mode": "apply" if args.apply else "dry-run", **asdict(stats)}
-    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    print(
+        json.dumps(
+            summary,
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    )
 
 
 if __name__ == "__main__":

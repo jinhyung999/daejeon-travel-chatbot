@@ -1,6 +1,6 @@
 import csv
-from contextlib import redirect_stdout
-from dataclasses import asdict
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import asdict, replace
 import hashlib
 from io import StringIO
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sqlite3
 import unittest
+from unittest.mock import patch
 import uuid
 
 from scripts import import_restaurant_recommendations as importer
@@ -37,8 +38,9 @@ APPROVED_FIELDS = [
 ]
 
 
-def make_place_db(database=":memory:", with_recommend=False):
-    conn = sqlite3.connect(database)
+def make_place_db(database=":memory:", with_recommend=False, factory=None):
+    connect_args = {"factory": factory} if factory is not None else {}
+    conn = sqlite3.connect(database, **connect_args)
     conn.row_factory = sqlite3.Row
     conn.execute(
         """
@@ -64,6 +66,18 @@ def make_place_db(database=":memory:", with_recommend=False):
     if with_recommend:
         ensure_recommend_schema(conn)
     return conn
+
+
+class FailingIntegrityConnection(sqlite3.Connection):
+    class _IntegrityResult:
+        @staticmethod
+        def fetchone():
+            return ("simulated corruption",)
+
+    def execute(self, sql, parameters=()):
+        if sql.strip().lower() == "pragma integrity_check":
+            return self._IntegrityResult()
+        return super().execute(sql, parameters)
 
 
 class RecommendSchemaTest(unittest.TestCase):
@@ -142,11 +156,21 @@ def candidate_at(name, lat, lng, address="대전 중구 중앙로 1"):
     )
 
 
-def insert_place(conn, place_id, name, lat, lng, extra_json="{}"):
+def insert_place(
+    conn,
+    place_id,
+    name,
+    lat,
+    lng,
+    extra_json="{}",
+    address="대전 중구 중앙로 1",
+    homepage=None,
+):
     conn.execute(
-        "INSERT INTO place (place_id,name,category,address,lat,lng,source_api,extra_json) "
-        "VALUES (?,?,'restaurant','대전 중구 중앙로 1',?,?,'sbiz',?)",
-        (place_id, name, lat, lng, extra_json),
+        "INSERT INTO place "
+        "(place_id,name,category,address,lat,lng,source_api,extra_json,homepage) "
+        "VALUES (?,?,'restaurant',?, ?,?,'sbiz',?,?)",
+        (place_id, name, address, lat, lng, extra_json, homepage),
     )
 
 
@@ -188,10 +212,27 @@ def place_row(
         "INSERT INTO p VALUES (?, ?, ?, ?, ?, ?)",
         (place_id, name, lat, lng, source_api, address),
     )
-    return conn.execute("SELECT * FROM p").fetchone()
+    row = conn.execute("SELECT * FROM p").fetchone()
+    result = dict(row)
+    conn.close()
+    return result
 
 
 class PlaceMatchingTest(unittest.TestCase):
+    def test_blank_normalized_names_do_not_match_by_proximity(self):
+        candidate = candidate_at("---", 36.35, 127.38)
+        rows = [place_row("p1", "...", 36.3501, 127.38, "sbiz")]
+
+        self.assertIsNone(select_existing_place(candidate, rows, set()))
+
+    def test_blank_normalized_addresses_do_not_match_without_coordinates(self):
+        candidate = candidate_at("중앙식당", 36.35, 127.38, address="---")
+        rows = [
+            place_row("p1", "중앙식당", None, None, "sbiz", address="...")
+        ]
+
+        self.assertIsNone(select_existing_place(candidate, rows, set()))
+
     def test_exact_name_within_100m_reuses_existing_place(self):
         candidate = candidate_at("영화 반점", 36.40, 127.42)
         rows = [place_row("p1", "영화반점", 36.4005, 127.4202, "sbiz")]
@@ -208,6 +249,18 @@ class PlaceMatchingTest(unittest.TestCase):
             )
         ]
 
+        self.assertEqual(
+            select_existing_place(candidate, rows, set())["place_id"], "p1"
+        )
+
+    def test_ratio_only_similar_name_within_50m_reuses_existing_place(self):
+        candidate = candidate_at("중앙칼국수", 36.35, 127.38)
+        rows = [
+            place_row("p1", "중앙칼국시", 36.3501, 127.38, "tourapi")
+        ]
+
+        self.assertNotIn("중앙칼국수", "중앙칼국시")
+        self.assertNotIn("중앙칼국시", "중앙칼국수")
         self.assertEqual(
             select_existing_place(candidate, rows, set())["place_id"], "p1"
         )
@@ -243,6 +296,18 @@ class PlaceMatchingTest(unittest.TestCase):
         self.assertEqual(
             select_existing_place(candidate, rows, set())["place_id"], "p1"
         )
+
+    def test_exact_name_with_different_address_does_not_match_without_coordinates(self):
+        candidate = candidate_at(
+            "중앙식당", 36.35, 127.38, "대전 중구 중앙로 1"
+        )
+        rows = [
+            place_row(
+                "p1", "중앙 식당", None, None, "sbiz", "대전 서구 둔산로 2"
+            )
+        ]
+
+        self.assertIsNone(select_existing_place(candidate, rows, set()))
 
     def test_preferred_recommendation_row_wins_multiple_matches(self):
         candidate = candidate_at("중앙식당", 36.35, 127.38)
@@ -294,6 +359,210 @@ class PlaceMatchingTest(unittest.TestCase):
 
 
 class RecommendationImportTest(unittest.TestCase):
+    def test_rejects_nonfinite_and_out_of_bounds_coordinates(self):
+        invalid_coordinates = [
+            (float("nan"), 127.38),
+            (float("inf"), 127.38),
+            (-float("inf"), 127.38),
+            (36.09, 127.38),
+            (36.35, 127.61),
+        ]
+
+        for latitude, longitude in invalid_coordinates:
+            with self.subTest(latitude=latitude, longitude=longitude):
+                conn = make_place_db(with_recommend=True)
+                try:
+                    with self.assertRaisesRegex(ValueError, "coordinate"):
+                        apply_rows(
+                            conn,
+                            approved=[candidate_at("범위밖식당", latitude, longitude)],
+                        )
+                    self.assertEqual(
+                        conn.execute("SELECT COUNT(*) FROM place").fetchone()[0], 0
+                    )
+                finally:
+                    conn.close()
+
+    def test_nonstandard_json_constant_causes_full_rollback(self):
+        conn = make_place_db(with_recommend=True)
+        self.addCleanup(conn.close)
+        insert_place(conn, "marked", "기존식당", 36.31, 127.31)
+        insert_place(
+            conn,
+            "bad-json",
+            "중앙식당",
+            36.35,
+            127.38,
+            extra_json='{"legacy": NaN}',
+        )
+        conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "JSON"):
+            apply_rows(
+                conn,
+                approved=[candidate_at("중앙식당", 36.35, 127.38)],
+                existing_ids=["marked"],
+            )
+
+        marked = conn.execute(
+            "SELECT recommend FROM place WHERE place_id='marked'"
+        ).fetchone()[0]
+        raw_extra = conn.execute(
+            "SELECT extra_json FROM place WHERE place_id='bad-json'"
+        ).fetchone()[0]
+        self.assertIsNone(marked)
+        self.assertEqual(raw_extra, '{"legacy": NaN}')
+
+    def test_unresolved_preferred_id_rolls_back_schema_and_data(self):
+        conn = make_place_db()
+        self.addCleanup(conn.close)
+        insert_place(conn, "present", "기존식당", 36.31, 127.31)
+        conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "preferred"):
+            apply_rows(
+                conn,
+                approved=[candidate_at("신규식당", 36.40, 127.42)],
+                existing_ids=["present", "missing"],
+            )
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(place)")}
+        self.assertNotIn("recommend", columns)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM place").fetchone()[0], 1)
+
+    def test_missing_recommended_coordinates_roll_back(self):
+        conn = make_place_db(with_recommend=True)
+        self.addCleanup(conn.close)
+        insert_place(conn, "missing-coords", "기존식당", None, None)
+        conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "coordinate"):
+            apply_rows(conn, approved=[], existing_ids=["missing-coords"])
+
+        recommend = conn.execute(
+            "SELECT recommend FROM place WHERE place_id='missing-coords'"
+        ).fetchone()[0]
+        self.assertIsNone(recommend)
+
+    def test_finite_legacy_coordinates_are_not_rejected_by_candidate_bounds(self):
+        conn = make_place_db(with_recommend=True)
+        self.addCleanup(conn.close)
+        insert_place(conn, "legacy-coords", "기존식당", 0.0, 0.0)
+        conn.commit()
+
+        error = None
+        stats = None
+        try:
+            stats = apply_rows(conn, approved=[], existing_ids=["legacy-coords"])
+        except ValueError as caught:
+            error = str(caught)
+
+        self.assertIsNone(error)
+        self.assertEqual(stats.recommended_total, 1)
+        recommend = conn.execute(
+            "SELECT recommend FROM place WHERE place_id='legacy-coords'"
+        ).fetchone()[0]
+        self.assertEqual(recommend, "추천")
+
+    def test_invalid_recommended_json_rolls_back(self):
+        conn = make_place_db(with_recommend=True)
+        self.addCleanup(conn.close)
+        insert_place(
+            conn,
+            "invalid-json",
+            "기존식당",
+            36.31,
+            127.31,
+            extra_json='{"value": Infinity}',
+        )
+        conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "JSON"):
+            apply_rows(conn, approved=[], existing_ids=["invalid-json"])
+
+        recommend = conn.execute(
+            "SELECT recommend FROM place WHERE place_id='invalid-json'"
+        ).fetchone()[0]
+        self.assertIsNone(recommend)
+
+    def test_failed_integrity_postcondition_rolls_back(self):
+        conn = make_place_db(
+            with_recommend=True,
+            factory=FailingIntegrityConnection,
+        )
+        self.addCleanup(conn.close)
+        insert_place(conn, "existing", "기존식당", 36.31, 127.31)
+        conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            apply_rows(conn, approved=[], existing_ids=["existing"])
+
+        recommend = conn.execute(
+            "SELECT recommend FROM place WHERE place_id='existing'"
+        ).fetchone()[0]
+        self.assertIsNone(recommend)
+
+    def test_blank_address_and_homepage_are_backfilled(self):
+        conn = make_place_db(with_recommend=True)
+        self.addCleanup(conn.close)
+        insert_place(
+            conn,
+            "p1",
+            "중앙식당",
+            36.35,
+            127.38,
+            address="  ",
+            homepage="",
+        )
+        candidate = replace(
+            candidate_at(
+                "중앙식당",
+                36.35,
+                127.38,
+                address="대전 중구 새주소 9",
+            ),
+            naver_link="https://naver.me/example",
+        )
+
+        apply_rows(conn, approved=[candidate])
+
+        row = conn.execute(
+            "SELECT address, homepage FROM place WHERE place_id='p1'"
+        ).fetchone()
+        self.assertEqual(tuple(row), (candidate.best_address, candidate.naver_link))
+
+    def test_existing_address_and_homepage_are_preserved(self):
+        conn = make_place_db(with_recommend=True)
+        self.addCleanup(conn.close)
+        insert_place(
+            conn,
+            "p1",
+            "중앙식당",
+            36.35,
+            127.38,
+            address="대전 중구 기존주소 1",
+            homepage="https://canonical.example/restaurant",
+        )
+        candidate = replace(
+            candidate_at(
+                "중앙식당",
+                36.35,
+                127.38,
+                address="대전 중구 새주소 9",
+            ),
+            naver_link="https://naver.me/example",
+        )
+
+        apply_rows(conn, approved=[candidate])
+
+        row = conn.execute(
+            "SELECT address, homepage FROM place WHERE place_id='p1'"
+        ).fetchone()
+        self.assertEqual(
+            tuple(row),
+            ("대전 중구 기존주소 1", "https://canonical.example/restaurant"),
+        )
+
     def test_existing_coordinates_and_extra_keys_are_preserved(self):
         conn = make_place_db(with_recommend=True)
         self.addCleanup(conn.close)
@@ -357,7 +626,10 @@ class RecommendationImportTest(unittest.TestCase):
     def test_unmatched_candidate_is_inserted_once(self):
         conn = make_place_db(with_recommend=True)
         self.addCleanup(conn.close)
-        candidate = candidate_at("새로운식당", 36.35, 127.38)
+        candidate = replace(
+            candidate_at("새로운식당", 36.35, 127.38),
+            naver_link="https://naver.me/new",
+        )
 
         first = apply_rows(conn, approved=[candidate])
         second = apply_rows(conn, approved=[candidate])
@@ -371,6 +643,7 @@ class RecommendationImportTest(unittest.TestCase):
         self.assertEqual(row["category"], "restaurant")
         self.assertEqual(row["address"], candidate.best_address)
         self.assertEqual(row["source_api"], "naver_search")
+        self.assertEqual(row["homepage"], candidate.naver_link)
         self.assertEqual(row["recommend"], "추천")
 
     def test_existing_ids_are_marked_and_source_overlap_is_counted(self):
@@ -448,6 +721,43 @@ class RecommendationImportCliTest(unittest.TestCase):
         self.assertEqual(summary["inserted"], 1)
         self.assertEqual(summary["source_overlap"], 0)
         self.assertEqual(summary["recommended_total"], 2)
+
+    def test_dry_run_opens_source_database_read_only(self):
+        real_connect = sqlite3.connect
+        calls = []
+
+        def recording_connect(database, *args, **kwargs):
+            calls.append((database, kwargs.copy()))
+            return real_connect(database, *args, **kwargs)
+
+        with patch.object(importer.sqlite3, "connect", side_effect=recording_connect):
+            self._run_cli()
+
+        source, options = calls[0]
+        self.assertTrue(str(source).startswith("file:"))
+        self.assertIn("mode=ro", str(source))
+        self.assertIs(options.get("uri"), True)
+
+    def test_dry_run_does_not_create_missing_database(self):
+        missing = REPO_ROOT / f".tmp_missing_{uuid.uuid4().hex}.db"
+        arguments = [
+            "--db", str(missing),
+            "--existing-csv", str(self.existing_path),
+            "--approved-csv", str(self.approved_path),
+        ]
+        caught = None
+        created = None
+        try:
+            with redirect_stderr(StringIO()):
+                importer.main(arguments)
+        except BaseException as error:
+            caught = error
+        finally:
+            created = missing.exists()
+            missing.unlink(missing_ok=True)
+
+        self.assertIsInstance(caught, SystemExit)
+        self.assertFalse(created)
 
     def test_apply_persists_changes_and_reports_counts(self):
         summary = self._run_cli(apply=True)

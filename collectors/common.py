@@ -13,9 +13,16 @@
 import json                  # JSON 데이터 저장/읽기용 모듈
 import time                  # 대기(sleep) 기능 사용
 import sqlite3               # SQLite 데이터베이스 사용
+import sys
 from pathlib import Path     # 운영체제와 상관없이 경로 관리
 
 import requests              # HTTP API 요청 라이브러리
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.recommendation_json import merge_recommendation_object
 
 # 현재 파일 기준으로 DB 파일 경로 설정
 DB_PATH = Path(__file__).parent.parent / "db" / "travel.db"
@@ -142,18 +149,31 @@ def upsert_place(rows: list[dict]):
         if row.get("place_id")
     })
     existing_place_ids = set()
+    existing_extra_by_id = {}
 
     # SQLite has a variable limit, so check existing IDs in chunks.
     for i in range(0, len(unique_place_ids), 900):
         chunk = unique_place_ids[i:i + 900]
         placeholders = ",".join("?" for _ in chunk)
-        existing_place_ids.update(
-            place_id
-            for (place_id,) in cur.execute(
-                f"SELECT place_id FROM place WHERE place_id IN ({placeholders})",
-                chunk,
-            ).fetchall()
-        )
+        existing_rows = cur.execute(
+            f"SELECT place_id, extra_json FROM place "
+            f"WHERE place_id IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        for place_id, extra_json in existing_rows:
+            existing_place_ids.add(place_id)
+            existing_extra_by_id[place_id] = extra_json
+
+    prepared_rows = []
+    for row in rows:
+        prepared = dict(row)
+        if row.get("place_id") in existing_extra_by_id:
+            prepared["extra_json"] = merge_recommendation_object(
+                row.get("extra_json"),
+                existing_extra_by_id[row["place_id"]],
+                prefer_secondary=True,
+            )
+        prepared_rows.append(prepared)
 
     inserted_count = len(set(unique_place_ids) - existing_place_ids)
     updated_count = len(existing_place_ids)
@@ -175,7 +195,7 @@ def upsert_place(rows: list[dict]):
             fee=excluded.fee, has_parking=excluded.has_parking,
             tel=excluded.tel, source_api=excluded.source_api,
             extra_json=excluded.extra_json
-    """, rows)
+    """, prepared_rows)
 
     # DB 반영
     conn.commit()

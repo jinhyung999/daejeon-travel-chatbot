@@ -25,6 +25,11 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+try:
+    from scripts.recommendation_json import merge_recommendation_object
+except ModuleNotFoundError:
+    from recommendation_json import merge_recommendation_object
+
 DB_PATH = Path(__file__).parent.parent / "db" / "travel.db"
 
 DIST_THRESHOLD_M = 50  # 이 거리 이내의 동일 이름 장소만 중복으로 판정
@@ -120,6 +125,19 @@ def pick_winner(cluster):
     )
 
 
+def ensure_place_removed_schema(conn):
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS place_removed (
+            {', '.join(c + ' TEXT' if c not in ('lat', 'lng', 'has_parking') else c + ' REAL' for c in ALL_COLUMNS)},
+            merged_into TEXT,
+            removed_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(place_removed)")}
+    if "recommend" not in columns:
+        conn.execute("ALTER TABLE place_removed ADD COLUMN recommend TEXT")
+
+
 def run(apply=False):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -132,13 +150,7 @@ def run(apply=False):
           f"(총 {sum(len(c) for c in clusters)}행 → {len(clusters)}행으로 병합)\n")
 
     if apply:
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS place_removed (
-                {', '.join(c + ' TEXT' if c not in ('lat', 'lng', 'has_parking') else c + ' REAL' for c in ALL_COLUMNS)},
-                merged_into TEXT,
-                removed_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        ensure_place_removed_schema(conn)
 
     removed = 0
     for cluster in clusters:
@@ -153,6 +165,16 @@ def run(apply=False):
                     if loser[col] not in (None, ""):
                         fills[col] = loser[col]
                         break
+
+        merged_extra = winner["extra_json"]
+        for loser in losers:
+            if loser["recommend"] not in (None, ""):
+                merged_extra = merge_recommendation_object(
+                    merged_extra,
+                    loser["extra_json"],
+                )
+        if merged_extra != winner["extra_json"]:
+            fills["extra_json"] = merged_extra
 
         print(f"[유지] {winner['place_id']} ({winner['source_api']}) {winner['name']}"
               + (f"  +흡수필드: {list(fills)}" if fills else ""))
