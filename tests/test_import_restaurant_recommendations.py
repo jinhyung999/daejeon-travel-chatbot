@@ -444,25 +444,19 @@ class RecommendationImportTest(unittest.TestCase):
         ).fetchone()[0]
         self.assertIsNone(recommend)
 
-    def test_finite_legacy_coordinates_are_not_rejected_by_candidate_bounds(self):
+    def test_out_of_bounds_recommended_coordinates_roll_back(self):
         conn = make_place_db(with_recommend=True)
         self.addCleanup(conn.close)
-        insert_place(conn, "legacy-coords", "기존식당", 0.0, 0.0)
+        insert_place(conn, "outside-bounds", "기존식당", 0.0, 0.0)
         conn.commit()
 
-        error = None
-        stats = None
-        try:
-            stats = apply_rows(conn, approved=[], existing_ids=["legacy-coords"])
-        except ValueError as caught:
-            error = str(caught)
+        with self.assertRaisesRegex(ValueError, "coordinate"):
+            apply_rows(conn, approved=[], existing_ids=["outside-bounds"])
 
-        self.assertIsNone(error)
-        self.assertEqual(stats.recommended_total, 1)
         recommend = conn.execute(
-            "SELECT recommend FROM place WHERE place_id='legacy-coords'"
+            "SELECT recommend FROM place WHERE place_id='outside-bounds'"
         ).fetchone()[0]
-        self.assertEqual(recommend, "추천")
+        self.assertIsNone(recommend)
 
     def test_invalid_recommended_json_rolls_back(self):
         conn = make_place_db(with_recommend=True)
@@ -562,6 +556,28 @@ class RecommendationImportTest(unittest.TestCase):
             tuple(row),
             ("대전 중구 기존주소 1", "https://canonical.example/restaurant"),
         )
+
+    def test_blank_naver_link_does_not_replace_null_homepage(self):
+        conn = make_place_db(with_recommend=True)
+        self.addCleanup(conn.close)
+        insert_place(
+            conn,
+            "p1",
+            "중앙식당",
+            36.35,
+            127.38,
+            homepage=None,
+        )
+
+        apply_rows(
+            conn,
+            approved=[candidate_at("중앙식당", 36.35, 127.38)],
+        )
+
+        homepage = conn.execute(
+            "SELECT homepage FROM place WHERE place_id='p1'"
+        ).fetchone()[0]
+        self.assertIsNone(homepage)
 
     def test_existing_coordinates_and_extra_keys_are_preserved(self):
         conn = make_place_db(with_recommend=True)

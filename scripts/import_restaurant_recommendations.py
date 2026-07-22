@@ -89,15 +89,6 @@ def _coordinates_in_daejeon(latitude, longitude):
     )
 
 
-def _coordinates_are_present_and_finite(latitude, longitude):
-    if latitude is None or longitude is None:
-        return False
-    try:
-        return math.isfinite(float(latitude)) and math.isfinite(float(longitude))
-    except (TypeError, ValueError):
-        return False
-
-
 def _validate_candidate(candidate):
     if not _coordinates_in_daejeon(candidate.latitude, candidate.longitude):
         raise ValueError(
@@ -275,7 +266,7 @@ def _validate_import_postconditions(conn, preferred_ids):
         "WHERE category='restaurant' AND recommend='추천'"
     ).fetchall()
     for place_id, latitude, longitude, extra_json in recommended_rows:
-        if not _coordinates_are_present_and_finite(latitude, longitude):
+        if not _coordinates_in_daejeon(latitude, longitude):
             raise ValueError(
                 f"recommended place has invalid coordinate: {place_id}"
             )
@@ -332,7 +323,10 @@ def apply_recommendations(conn, existing_csv, approved_csv):
                 )
                 homepage = (
                     candidate.naver_link
-                    if _is_blank(match["homepage"])
+                    if (
+                        _is_blank(match["homepage"])
+                        and not _is_blank(candidate.naver_link)
+                    )
                     else match["homepage"]
                 )
                 conn.execute(
