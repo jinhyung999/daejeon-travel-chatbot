@@ -1,4 +1,5 @@
 import os
+import re
 import time
 
 from dotenv import load_dotenv
@@ -13,6 +14,31 @@ except ModuleNotFoundError:
     from collectors.concept_llm import extract_concept_fields
 
 load_dotenv()
+
+_DONG_IN_PARENS_RE = re.compile(r"\(([가-힣0-9]+동)\)")
+_GU_RE = re.compile(r"([가-힣]+구)")
+
+
+def _neighborhood_from_address(address: str | None) -> str:
+    """주소에서 검색어로 쓸 동네 단위를 뽑는다.
+
+    도로명주소는 동 정보가 괄호로 붙어있을 때만 있고(예: "(반석동)"), 없는 경우가
+    많다. 괄호 안 동명을 우선 쓰고, 없으면 구 단위로 폴백한다. "60동"처럼 건물
+    동번호가 주소에 그냥 섞여 있는 경우가 있어서, 괄호 밖의 "OO동"은 동네 이름으로
+    보지 않는다 — 행정동이 아닐 수 있기 때문이다.
+    """
+    if not address:
+        return ""
+
+    dong_match = _DONG_IN_PARENS_RE.search(address)
+    if dong_match:
+        return dong_match.group(1)
+
+    gu_match = _GU_RE.search(address)
+    if gu_match:
+        return gu_match.group(1)
+
+    return ""
 
 
 def ensure_giftshop_enrichment_schema(conn) -> None:
@@ -96,7 +122,7 @@ def enrich(batch_commit=20, conn=None, naver_client=None, extract_fn=extract_con
 
     updated, skipped, failed = 0, 0, 0
     for place_id, name, address in rows:
-        query = f"{name} {address or ''}".strip()
+        query = f"{name} {_neighborhood_from_address(address)}".strip()
         snippets, blog_urls = _collect_snippets(naver_client, query)
 
         if not snippets:

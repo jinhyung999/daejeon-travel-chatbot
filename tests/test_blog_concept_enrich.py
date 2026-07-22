@@ -31,6 +31,31 @@ def make_place_db():
     return conn
 
 
+class NeighborhoodFromAddressTest(unittest.TestCase):
+    def test_extracts_parenthesized_dong_when_present(self):
+        self.assertEqual(
+            enrich_mod._neighborhood_from_address("대전광역시 유성구 반석로 136-6 (반석동)"),
+            "반석동",
+        )
+
+    def test_falls_back_to_gu_when_no_dong_in_parens(self):
+        self.assertEqual(
+            enrich_mod._neighborhood_from_address("대전광역시 유성구 신성로84번길 49"),
+            "유성구",
+        )
+
+    def test_does_not_mistake_building_dong_number_for_neighborhood(self):
+        # "60동"은 건물 동번호이지 행정동이 아니다. 괄호 안에 없으므로 구로 폴백해야 한다.
+        self.assertEqual(
+            enrich_mod._neighborhood_from_address("대전광역시 대덕구 한남로 70 60동 102호 소하서샵"),
+            "대덕구",
+        )
+
+    def test_returns_empty_string_for_blank_address(self):
+        self.assertEqual(enrich_mod._neighborhood_from_address(""), "")
+        self.assertEqual(enrich_mod._neighborhood_from_address(None), "")
+
+
 class EnsureGiftshopEnrichmentSchemaTest(unittest.TestCase):
     def test_adds_missing_columns(self):
         conn = make_place_db()
@@ -111,8 +136,8 @@ class EnrichTest(unittest.TestCase):
         self._seed_place(conn, "p1", recommend="추천")
         self._seed_place(conn, "p2", recommend=None)
         naver_client = FakeNaverBlogClient({
-            ("다구로잉 대전 중구", "sim"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
-            ("다구로잉 대전 중구", "date"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
+            ("다구로잉 중구", "sim"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
+            ("다구로잉 중구", "date"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
         })
 
         enrich_mod.enrich(conn=conn, naver_client=naver_client, extract_fn=fake_extract_fn)
@@ -125,8 +150,8 @@ class EnrichTest(unittest.TestCase):
         enrich_mod.ensure_giftshop_enrichment_schema(conn)
         self._seed_place(conn, "p1")
         naver_client = FakeNaverBlogClient({
-            ("다구로잉 대전 중구", "sim"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
-            ("다구로잉 대전 중구", "date"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
+            ("다구로잉 중구", "sim"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
+            ("다구로잉 중구", "date"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
         })
 
         enrich_mod.enrich(conn=conn, naver_client=naver_client, extract_fn=fake_extract_fn)
@@ -143,8 +168,8 @@ class EnrichTest(unittest.TestCase):
         enrich_mod.ensure_giftshop_enrichment_schema(conn)
         self._seed_place(conn, "p1", open_time="이미 확인된 시간")
         naver_client = FakeNaverBlogClient({
-            ("다구로잉 대전 중구", "sim"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
-            ("다구로잉 대전 중구", "date"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
+            ("다구로잉 중구", "sim"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
+            ("다구로잉 중구", "date"): {"items": [{"link": "u1", "description": "빈티지 소품샵"}], "total": 1},
         })
 
         enrich_mod.enrich(conn=conn, naver_client=naver_client, extract_fn=fake_extract_fn)
