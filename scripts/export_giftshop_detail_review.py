@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -28,9 +29,18 @@ FIELDNAMES = [
 def _giftshops(conn):
     conn.row_factory = sqlite3.Row
     return [dict(row) for row in conn.execute(
-        "SELECT place_id, name, address, lat, lng, tel, open_time, close_day "
+        "SELECT place_id, name, address, lat, lng, tel, open_time, close_day, extra_json "
         "FROM place WHERE category='giftshop' ORDER BY place_id"
     )]
+
+
+def _detail_enrichment(place):
+    try:
+        extra = json.loads(place["extra_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    detail = extra.get("detail_enrichment") if isinstance(extra, dict) else None
+    return detail if isinstance(detail, dict) else {}
 
 
 def collect_review_rows(conn, client):
@@ -47,16 +57,28 @@ def collect_review_rows(conn, client):
                 "kakao_tel": "", "kakao_place_url": "", "match_status": "error",
                 "match_error": str(error),
             }
-        suggested_tel = place["tel"] or candidate["kakao_tel"]
+        detail = _detail_enrichment(place)
+        existing_tel_source = detail.get("tel_source_url") or ""
+        hours_source = detail.get("hours_source_url") or ""
+        if place["tel"] and existing_tel_source:
+            suggested_tel = place["tel"]
+            tel_source = existing_tel_source
+        elif candidate["kakao_tel"] and candidate["kakao_place_url"]:
+            suggested_tel = candidate["kakao_tel"]
+            tel_source = candidate["kakao_place_url"]
+        else:
+            suggested_tel = ""
+            tel_source = ""
         output.append({
             "place_id": place["place_id"], "name": place["name"],
             "address": place["address"] or "", "lat": place["lat"], "lng": place["lng"],
             **candidate,
             "tel": suggested_tel or "",
-            "open_time": place["open_time"] or "",
-            "close_day": place["close_day"] or "",
-            "tel_source_url": candidate["kakao_place_url"] if suggested_tel == candidate["kakao_tel"] else "",
-            "hours_source_url": "", "verified_at": "", "review_status": "pending",
+            "open_time": (place["open_time"] or "") if hours_source else "",
+            "close_day": (place["close_day"] or "") if hours_source else "",
+            "tel_source_url": tel_source,
+            "hours_source_url": hours_source if (place["open_time"] or place["close_day"]) else "",
+            "verified_at": "", "review_status": "pending",
             "review_note": "",
         })
     return output

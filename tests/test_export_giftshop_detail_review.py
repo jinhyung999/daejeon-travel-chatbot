@@ -1,4 +1,5 @@
 import csv
+import json
 import sqlite3
 import unittest
 import uuid
@@ -29,8 +30,9 @@ def make_db(path=":memory:"):
 
 
 class FakeClient:
-    def __init__(self, error=False):
+    def __init__(self, error=False, place_url="https://place.map.kakao.com/1"):
         self.error = error
+        self.place_url = place_url
         self.queries = []
 
     def search_keyword(self, query, *, lat, lng):
@@ -44,7 +46,7 @@ class FakeClient:
             "x": str(lng),
             "y": str(lat),
             "phone": "042-111-2222",
-            "place_url": "https://place.map.kakao.com/1",
+            "place_url": self.place_url,
         }]
 
 
@@ -66,6 +68,86 @@ class GiftshopReviewExportTest(unittest.TestCase):
         row = collect_review_rows(conn, FakeClient(error=True))[0]
         self.assertEqual("error", row["match_status"])
         self.assertIn("network down", row["match_error"])
+
+    def test_existing_values_with_provenance_are_copied(self):
+        conn = make_db()
+        self.addCleanup(conn.close)
+        detail = {
+            "tel_source_url": "https://example.com/tel",
+            "hours_source_url": "https://example.com/hours",
+        }
+        conn.execute(
+            "UPDATE place SET tel=?, open_time=?, close_day=?, extra_json=? WHERE place_id='g1'",
+            ("042-999-0000", "10:00-18:00", "Monday", json.dumps({"detail_enrichment": detail})),
+        )
+        conn.commit()
+
+        row = collect_review_rows(conn, FakeClient(error=True))[0]
+
+        self.assertEqual("042-999-0000", row["tel"])
+        self.assertEqual("10:00-18:00", row["open_time"])
+        self.assertEqual("Monday", row["close_day"])
+        self.assertEqual(detail["tel_source_url"], row["tel_source_url"])
+        self.assertEqual(detail["hours_source_url"], row["hours_source_url"])
+
+    def test_existing_values_without_provenance_are_left_blank(self):
+        conn = make_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "UPDATE place SET tel='042-999-0000', open_time='10:00-18:00', "
+            "close_day='Monday' WHERE place_id='g1'"
+        )
+        conn.commit()
+
+        row = collect_review_rows(conn, FakeClient(error=True))[0]
+
+        self.assertEqual("", row["tel"])
+        self.assertEqual("", row["open_time"])
+        self.assertEqual("", row["close_day"])
+        self.assertEqual("", row["tel_source_url"])
+        self.assertEqual("", row["hours_source_url"])
+
+    def test_kakao_tel_without_place_url_is_left_blank(self):
+        conn = make_db()
+        self.addCleanup(conn.close)
+
+        row = collect_review_rows(conn, FakeClient(place_url=""))[0]
+
+        self.assertEqual("", row["tel"])
+        self.assertEqual("", row["tel_source_url"])
+
+    def test_collection_continues_to_later_row_after_api_error(self):
+        conn = make_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO place VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, '{}')",
+            ("g2", "Later Shop", "giftshop", "Daejeon Seo-gu", 36.36, 127.38),
+        )
+        conn.commit()
+
+        class FailOnceClient:
+            def __init__(self):
+                self.calls = 0
+
+            def search_keyword(self, query, *, lat, lng):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("first row failed")
+                return [{
+                    "place_name": "Later Shop",
+                    "road_address_name": "Daejeon Seo-gu",
+                    "address_name": "",
+                    "x": str(lng),
+                    "y": str(lat),
+                    "phone": "042-222-3333",
+                    "place_url": "https://place.map.kakao.com/2",
+                }]
+
+        rows = collect_review_rows(conn, FailOnceClient())
+
+        self.assertEqual(["g1", "g2"], [row["place_id"] for row in rows])
+        self.assertEqual("error", rows[0]["match_status"])
+        self.assertEqual("042-222-3333", rows[1]["tel"])
 
     def test_writes_utf8_csv_with_exact_header_without_mutating_database(self):
         unique = uuid.uuid4().hex
