@@ -131,14 +131,16 @@ def paginate(fetch_page_fn, num_of_rows=100, max_pages=200, sleep_sec=0.3):
 
 
 # place 테이블에 데이터 저장 (없으면 INSERT, 있으면 UPDATE)
-def upsert_place(rows: list[dict]):
+def upsert_place(rows: list[dict], conn=None):
 
     if not rows:
         print("place upsert: 0건 / 신규 0건 / 갱신 0건")
         return {"total": 0, "inserted": 0, "updated": 0}
 
-    # DB 연결
-    conn = get_conn()
+    # DB 연결 (외부에서 주입되지 않았으면 새로 연다)
+    owns_conn = conn is None
+    if conn is None:
+        conn = get_conn()
 
     # Cursor 생성
     cur = conn.cursor()
@@ -200,8 +202,9 @@ def upsert_place(rows: list[dict]):
     # DB 반영
     conn.commit()
 
-    # 연결 종료
-    conn.close()
+    # 외부에서 주입된 커넥션은 이 함수가 닫지 않는다
+    if owns_conn:
+        conn.close()
 
     # 저장 결과 출력
     print(
