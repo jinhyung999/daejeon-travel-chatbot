@@ -96,6 +96,11 @@ def _parse_item(item):
     road_address = _clean_html(item.get("roadAddress"))
     address = _clean_html(item.get("address"))
 
+    # 구 이름(서구/중구/동구 등)이 다른 도시와 겹쳐서, 검색어에 "대전"을 넣어도
+    # 다른 지역 결과가 섞여 들어올 수 있다. 결과 주소 자체를 한 번 더 검증한다.
+    if "대전" not in (road_address or "") and "대전" not in (address or ""):
+        return None
+
     return {
         "name": name,
         "address": road_address or address,
@@ -125,7 +130,7 @@ def collect(target_count=TARGET_COUNT, conn=None, client=None):
             if len(place_rows) >= target_count:
                 break
             queries_tried += 1
-            items = client.search_local(f"{neighborhood} 소품샵", sort="random")
+            items = client.search_local(f"대전 {neighborhood} 소품샵", sort="random")
             for item in items:
                 parsed = _parse_item(item)
                 if not parsed:

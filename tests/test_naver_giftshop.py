@@ -67,6 +67,19 @@ NON_GIFTSHOP_ITEM = {
     "link": "https://blog.naver.com/other",
 }
 
+# "서구"는 대전뿐 아니라 부산·인천·광주에도 있는 흔한 구 이름이라, 검색어에 "대전"이
+# 없으면 다른 도시 결과가 섞여 들어온다 (실제로 겪은 문제: 49건 중 14건이 타 지역).
+NON_DAEJEON_ITEM = {
+    "title": "소품샵 흉내내는 부산가게",
+    "category": "가구,인테리어>인테리어소품",
+    "address": "부산광역시 서구 아무데 1",
+    "roadAddress": "부산광역시 서구 아무로 1",
+    "mapx": "1290550890",
+    "mapy": "351071579",
+    "telephone": "",
+    "link": "https://blog.naver.com/busan",
+}
+
 
 class StablePlaceIdTest(unittest.TestCase):
     def test_deterministic_for_same_input(self):
@@ -105,7 +118,7 @@ class CollectTest(unittest.TestCase):
     def test_filters_out_non_giftshop_category(self):
         conn = make_place_db()
         self.addCleanup(conn.close)
-        client = FakeNaverClient({"대흥동 소품샵": [NON_GIFTSHOP_ITEM]})
+        client = FakeNaverClient({"대전 대흥동 소품샵": [NON_GIFTSHOP_ITEM]})
 
         rows = naver_giftshop.collect(target_count=100, conn=conn, client=client)
 
@@ -114,7 +127,7 @@ class CollectTest(unittest.TestCase):
     def test_collects_giftshop_item_with_recommend_flag(self):
         conn = make_place_db()
         self.addCleanup(conn.close)
-        client = FakeNaverClient({"대흥동 소품샵": [GIFTSHOP_ITEM]})
+        client = FakeNaverClient({"대전 대흥동 소품샵": [GIFTSHOP_ITEM]})
 
         rows = naver_giftshop.collect(target_count=1, conn=conn, client=client)
 
@@ -130,8 +143,8 @@ class CollectTest(unittest.TestCase):
         self.addCleanup(conn.close)
         item2 = dict(GIFTSHOP_ITEM, title="소품샵 잠시다락", mapx="1274550890", mapy="363471579")
         client = FakeNaverClient({
-            "대덕구 소품샵": [GIFTSHOP_ITEM],
-            "신탄진 소품샵": [item2],
+            "대전 대덕구 소품샵": [GIFTSHOP_ITEM],
+            "대전 신탄진 소품샵": [item2],
         })
 
         rows = naver_giftshop.collect(target_count=1, conn=conn, client=client)
@@ -148,6 +161,26 @@ class CollectTest(unittest.TestCase):
             naver_giftshop.collect(target_count=100, conn=conn, client=client)
 
         self.assertIn("목표 100건 중 0건", out.getvalue())
+
+    def test_search_query_includes_daejeon(self):
+        conn = make_place_db()
+        self.addCleanup(conn.close)
+        client = FakeNaverClient({})
+
+        naver_giftshop.collect(target_count=100, conn=conn, client=client)
+
+        self.assertTrue(client.calls)
+        for query, _sort in client.calls:
+            self.assertIn("대전", query)
+
+    def test_filters_out_non_daejeon_address(self):
+        conn = make_place_db()
+        self.addCleanup(conn.close)
+        client = FakeNaverClient({"대전 대흥동 소품샵": [NON_DAEJEON_ITEM]})
+
+        rows = naver_giftshop.collect(target_count=100, conn=conn, client=client)
+
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":
