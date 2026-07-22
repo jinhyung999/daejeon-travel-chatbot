@@ -4,8 +4,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
+import uuid
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -30,12 +32,11 @@ def _text(row: dict, key: str) -> str:
 def read_review_rows(path: Path) -> list[dict]:
     with Path(path).open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        missing = [
-            field for field in FIELDNAMES if field not in (reader.fieldnames or [])
-        ]
-        if missing:
-            raise ValueError(f"review CSV missing columns: {', '.join(missing)}")
+        if reader.fieldnames != FIELDNAMES:
+            raise ValueError("review CSV header must exactly match FIELDNAMES")
         rows = list(reader)
+    if any(None in row or any(value is None for value in row.values()) for row in rows):
+        raise ValueError("review CSV contains a malformed row")
     ids = [_text(row, "place_id") for row in rows]
     if len(ids) != len(set(ids)):
         raise ValueError("review CSV contains duplicate place_id")
@@ -44,6 +45,8 @@ def read_review_rows(path: Path) -> list[dict]:
 
 def _validate_approved(row: dict) -> None:
     verified_at = _text(row, "verified_at")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", verified_at) is None:
+        raise ValueError(f"invalid verified_at for {_text(row, 'place_id')}")
     try:
         datetime.strptime(verified_at, "%Y-%m-%d")
     except ValueError as error:
@@ -142,8 +145,9 @@ def apply_review_rows(
 def _backup_database(source: sqlite3.Connection, db_path: Path) -> Path:
     backup_dir = Path(db_path).parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_path = backup_dir / f"travel_pre_giftshop_detail_{timestamp}.db"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    token = uuid.uuid4().hex
+    backup_path = backup_dir / f"travel_pre_giftshop_detail_{timestamp}-{token}.db"
     target = sqlite3.connect(backup_path)
     try:
         source.backup(target)
