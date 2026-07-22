@@ -4,3 +4,4 @@ pandas
 tqdm
 fastapi
 uvicorn
+openai
