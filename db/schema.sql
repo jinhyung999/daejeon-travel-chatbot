@@ -1,33 +1,88 @@
-CREATE TABLE IF NOT EXISTS place (
-  place_id      TEXT PRIMARY KEY,
-  name          TEXT NOT NULL,
-  category      TEXT NOT NULL,
-  address       TEXT,
-  lat           REAL,
-  lng           REAL,
-  open_time     TEXT,
-  close_day     TEXT,
-  fee           TEXT,
-  has_parking   INTEGER,
-  tel           TEXT,
-  source_api    TEXT,
-  extra_json    TEXT,
-  overview      TEXT,
-  homepage      TEXT,
-  recommend     TEXT,
-  concept_tag   TEXT,
-  photo_spot    INTEGER,
-  has_workshop  INTEGER,
-  blog_url_1    TEXT,
-  blog_url_2    TEXT,
-  blog_url_3    TEXT,
+BEGIN TRANSACTION;
+
+ALTER TABLE place RENAME TO place_old;
+
+CREATE TABLE place (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  place_id       TEXT,
+  name           TEXT NOT NULL,
+  category       TEXT NOT NULL,
+  address        TEXT,
+  lat            REAL,
+  lng            REAL,
+  open_time      TEXT,
+  close_day      TEXT,
+  fee            TEXT,
+  has_parking    INTEGER,
+  tel            TEXT,
+  source_api     TEXT,
+  extra_json     TEXT,
+  overview       TEXT,
+  homepage       TEXT,
+  recommend      TEXT,
+  concept_tag    TEXT,
+  photo_spot     INTEGER,
+  has_workshop   INTEGER,
   signature_menu TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_place_category ON place(category);
-CREATE INDEX IF NOT EXISTS idx_place_latlng ON place(lat, lng);
+INSERT INTO place (
+  place_id,
+  name,
+  category,
+  address,
+  lat,
+  lng,
+  open_time,
+  close_day,
+  fee,
+  has_parking,
+  tel,
+  source_api,
+  extra_json,
+  overview,
+  homepage,
+  recommend,
+  concept_tag,
+  photo_spot,
+  has_workshop,
+  signature_menu
+)
+SELECT
+  place_id,
+  name,
+  category,
+  address,
+  lat,
+  lng,
+  open_time,
+  close_day,
+  fee,
+  has_parking,
+  tel,
+  source_api,
+  extra_json,
+  overview,
+  homepage,
+  recommend,
+  concept_tag,
+  photo_spot,
+  has_workshop,
+  signature_menu
+FROM place_old;
+
+DROP TABLE place_old;
+
+CREATE INDEX IF NOT EXISTS idx_place_category
+ON place(category);
+
+CREATE INDEX IF NOT EXISTS idx_place_latlng
+ON place(lat, lng);
+
 CREATE INDEX IF NOT EXISTS idx_place_category_recommend
 ON place(category, recommend);
+
+COMMIT;
 
 CREATE TABLE IF NOT EXISTS event (
   event_id    TEXT PRIMARY KEY,
