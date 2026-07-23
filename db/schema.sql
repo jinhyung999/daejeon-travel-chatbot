@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS place (
   has_workshop  INTEGER,
   blog_url_1    TEXT,
   blog_url_2    TEXT,
-  blog_url_3    TEXT
+  blog_url_3    TEXT,
+  signature_menu TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_place_category ON place(category);
