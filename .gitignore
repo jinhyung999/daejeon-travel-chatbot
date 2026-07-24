@@ -42,3 +42,12 @@ docs/
 Thumbs.db
 # TAGO 단일화 마이그레이션 전 자동 생성되는 로컬 DB 백업
 db/backups/
+
+# Selenium 지속 프로필 (쿠키/캡챠 신뢰도 유지용, 개인 브라우저 데이터라 커밋 금지)
+.selenium_profile/
+*.png
+
+# 네이버지도 스크래핑 작업(아직 실험 단계라 커밋/푸시 보류)
+collectors/naver_map_*.py
+scripts/*naver_map*.py
+data/raw/naver_map/

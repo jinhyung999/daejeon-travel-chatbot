@@ -73,6 +73,11 @@ FROM place_old;
 
 DROP TABLE place_old;
 
+-- id를 PK로 바꾸면서 빠진 place_id UNIQUE 제약을 복원.
+-- upsert_place()의 ON CONFLICT(place_id)가 이 제약이 없으면 런타임 에러가 난다.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_place_place_id
+ON place(place_id);
+
 CREATE INDEX IF NOT EXISTS idx_place_category
 ON place(category);
 
